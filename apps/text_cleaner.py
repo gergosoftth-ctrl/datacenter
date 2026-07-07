@@ -1,44 +1,39 @@
 import streamlit as st
-import re
 
 def run_app():
     st.title("🧹 เครื่องมือจัดเรียงและทำความสะอาดข้อความ")
-    st.write("วางข้อความดิบของคุณลงในกล่องด้านล่าง เลือกตัวกรอง จากนั้นนำข้อความที่สะอาดแล้วไปใช้ได้ทันที")
+    st.write("วางข้อความดิบที่มีเครื่องหมายหนอน (~) หรืออัญประกาศ (\") เพื่อลบออกและจัดรูปแบบให้เรียบร้อย")
 
-    # แบ่งหน้าจอเป็น 2 คอลัมน์ (ซ้าย: กล่องรับข้อมูล/ควบคุม , ขวา: ผลลัพธ์)
+    # แบ่งหน้าจอเป็น 2 คอลัมน์ (ซ้าย: อินพุต , ขวา: เอาต์พุต)
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("📥 ข้อมูลเข้าและตั้งค่า")
-        input_text = st.text_area("วางข้อความดิบที่นี่:", height=200)
+        st.subheader("📥 ข้อมูลเข้า")
+        input_text = st.text_area("วางข้อความดิบที่นี่:", height=250, placeholder="ตัวอย่าง: ~ข้อความนี้มี \"เครื่องหมาย\" ที่ไม่ต้องการ~")
         
-        # ตัวเลือกการกรองข้อมูล
-        st.markdown("**ตัวเลือกการทำความสะอาด:**")
-        remove_special = st.checkbox("ลบอักขระพิเศษ (เหลือแค่ข้อความทั่วไปและช่องว่าง)", value=True)
-        remove_numbers = st.checkbox("ลบตัวเลข")
-        remove_empty = st.checkbox("ลบบรรทัดว่างและจัดระเบียบ", value=True)
+        # เพิ่มตัวเลือกเสริมสำหรับจัดระเบียบบรรทัด
+        st.markdown("**การจัดเรียงเพิ่มเติม:**")
+        remove_empty = st.checkbox("ลบบรรทัดว่างที่ไม่มีข้อความ", value=True)
 
     with col2:
         st.subheader("📤 ผลลัพธ์")
         
-        # ประมวลผลข้อมูล
         cleaned_text = input_text
         
         if input_text:
-            if remove_special:
-                # ลบอักขระพิเศษ ยกเว้นภาษาไทย ภาษาอังกฤษ ตัวเลข และช่องว่าง
-                cleaned_text = re.sub(r'[^a-zA-Z0-9ก-๙\s]', '', cleaned_text)
+            # 1. ลบเครื่องหมาย ~ ออกทั้งหมด
+            cleaned_text = cleaned_text.replace('~', '')
             
-            if remove_numbers:
-                cleaned_text = re.sub(r'[0-9]', '', cleaned_text)
-                
+            # 2. ลบเครื่องหมาย " ออกทั้งหมด
+            cleaned_text = cleaned_text.replace('"', '')
+            
+            # 3. จัดการเรื่องบรรทัดว่าง (ถ้าติ๊กเลือกไว้)
             if remove_empty:
-                # ตัดช่องว่างหัวท้ายบรรทัด และคัดแยกบรรทัดที่ว่างออก
                 lines = [line.strip() for line in cleaned_text.split('\n') if line.strip()]
                 cleaned_text = '\n'.join(lines)
         
-        # กล่องแสดงผลลัพธ์
-        st.text_area("ข้อความที่คลีนเรียบร้อยแล้ว:", value=cleaned_text, height=200, disabled=False)
+        # กล่องแสดงผลลัพธ์ที่ทำความสะอาดแล้ว
+        st.text_area("ข้อความที่ทำความสะอาดแล้ว:", value=cleaned_text, height=250)
         
-        if cleaned_text:
-            st.success("✨ ประมวลผลสำเร็จ!")
+        if input_text:
+            st.success("✨ ลบเครื่องหมาย ~ และ \" ออกเรียบร้อยแล้ว!")
