@@ -1,7 +1,7 @@
 import streamlit as st
 
 # ตั้งค่าหน้าจอ Dashboard
-st.set_page_config(page_title="My Tools Dashboard", layout="wide")
+st.set_page_config(page_title="Data Center Dashboard", layout="wide")
 
 st.sidebar.title("🚀 ศูนย์รวมแอปพลิเคชัน")
 st.sidebar.write("เลือกเครื่องมือที่ต้องการใช้งานด้านล่าง:")
