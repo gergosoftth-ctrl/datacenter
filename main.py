@@ -20,11 +20,11 @@ with header_col2:
     # บนขวา: แสดงวันที่และเวลาปัจจุบันแบบ Real-time (อัปเดตเมื่อรีเฟรชหน้า)
     current_time = datetime.now().strftime("%Aที่ %d %B %Y | เวลา %H:%M น.")
     st.markdown(
-        f"<div style='text-align: right; color: #666; font-size: 14px; padding-top: 10px;'>"
-        f"📅 {current_time}"
-        f"</div>", 
-        unsafe_allow_allowed=True, unsafe_allow_html=True
-    )
+    f"<div style='text-align: right; color: #666; font-size: 14px; padding-top: 10px;'>"
+    f"📅 {current_time}"
+    f"</div>", 
+    unsafe_allow_html=True  # เอาตัว unsafe_allow_allowed ออกไปครับ
+)
 
 st.markdown("---")
 
