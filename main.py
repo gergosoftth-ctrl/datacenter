@@ -123,9 +123,9 @@ else:
     
     # เรียกใช้แอปพลิเคชันตามคีย์ที่เลือก
     if st.session_state.selected_app == "text_cleaner":
-        try:
-            import text_cleaner
-            text_cleaner.run_app()
+    try:
+        from apps import text_cleaner  # <-- เปลี่ยนเป็นดึงมาจากโฟลเดอร์ apps
+        text_cleaner.run_app()
         except ModuleNotFoundError:
             st.error("❌ ไม่พบไฟล์ `text_cleaner.py` ในระบบ")
             
