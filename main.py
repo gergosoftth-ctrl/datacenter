@@ -99,4 +99,35 @@ if st.session_state.selected_app is None:
             for app in matched_apps:
                 with st.container():
                     st.markdown(
-                        f"<div style='border: 1px solid #e0e0e0; border-radius: 10
+                        f"<div style='border: 1px solid #e0e0e0; border-radius: 10px; padding: 15px; margin-bottom: 10px; background-color: #fafafa;'>"
+                        f"<h4>{app['title']}</h4>"
+                        f"<p style='color: #666; font-size: 14px;'>{app['description']}</p>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+                    if st.button(f"เปิดใช้งาน {app['title']}", key=f"btn_{app['key']}"):
+                        st.session_state.selected_app = app["key"]
+                        st.rerun()
+        else:
+            st.warning(f"😔 ไม่พบเครื่องมือที่ตรงกับคำว่า '{search_query}' ลองเปลี่ยนคีย์เวิร์ดดูนะคร้าบ")
+
+
+# --- ส่วนที่ 6: หน้าตาเมื่อเปิดแอปพลิเคชันขึ้นมาทำงาน ---
+else:
+    if st.button("⬅️ กลับไปหน้าหลัก (ค้นหาเครื่องมือ)"):
+        st.session_state.selected_app = None
+        st.rerun()
+        
+    st.markdown("---")
+    
+    # เรียกใช้แอปพลิเคชันตามคีย์ที่เลือก
+    if st.session_state.selected_app == "text_cleaner":
+        try:
+            from apps import text_cleaner  #ย่อหน้าตรงนี้ได้รับการแก้ไขแล้ว
+            text_cleaner.run_app()
+        except ModuleNotFoundError:
+            st.error("❌ ไม่พบไฟล์ `text_cleaner.py` ในโฟลเดอร์ `apps` กรุณาตรวจสอบอีกครั้ง")
+            
+    elif st.session_state.selected_app == "supabase_db":
+        st.title("🗂️ ระบบจัดการข้อมูลหลังบ้าน (Supabase)")
+        st.warning("🚧 แอปพลิเคชันนี้กำลังเปิดระบบหลังบ้าน (อยู่ในช่วงพักสถานะชั่วคราว)")
