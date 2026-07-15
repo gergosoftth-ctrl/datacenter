@@ -3,9 +3,8 @@ import re
 
 def run_app():
     st.title("🧹 เครื่องมือจัดเรียงและทำความสะอาดข้อความ")
-    st.write("ระบบจะลบเครื่องหมาย ~, \", อักขระพิเศษต่างดาว และบรรทัดว่างออกให้โดยอัตโนมัติ (พร้อมเว้นบรรทัดก่อนหน้าข้อความ OPEN Problem)")
+    st.write("ระบบจะลบเครื่องหมาย ~, \", อักขระต่างดาว และคัดกรองบรรทัดว่างอย่างแม่นยำ")
 
-    # แบ่งหน้าจอเป็น 2 คอลัมน์ (ซ้าย: อินพุต , ขวา: เอาต์พุต)
     col1, col2 = st.columns(2)
 
     with col1:
@@ -13,7 +12,7 @@ def run_app():
         input_text = st.text_area(
             "วางข้อความดิบที่นี่:", 
             height=280, 
-            placeholder="วางข้อความที่มี ~ , \" หรือสัญลักษณ์ปริศนาลงไปได้เลย..."
+            placeholder="วางข้อความลงไปได้เลย..."
         )
 
     with col2:
@@ -22,38 +21,51 @@ def run_app():
         cleaned_text = input_text
         
         if input_text:
-            # เงื่อนไขที่ 1: ลบเครื่องหมาย ~
+            # เงื่อนไขที่ 1-3: ลบอักขระที่ไม่ต้องการออกก่อน
             cleaned_text = cleaned_text.replace('~', '')
-            
-            # เงื่อนไขที่ 2: ลบเครื่องหมาย "
             cleaned_text = cleaned_text.replace('"', '')
-            
-            # เงื่อนไขที่ 3: ลบอักขระพิเศษกลุ่มต่างดาว (Private Use Areas: U+E000 ถึง U+F8FF)
             cleaned_text = re.sub(r'[\uE000-\uF8FF]', '', cleaned_text)
             
-            # --- เริ่มขั้นตอนการจัดระเบียบบรรทัดตามเงื่อนไขพิเศษ ---
-            # 1. แตกข้อความออกมาดูทีละบรรทัด และลบช่องว่างส่วนเกินหัวท้ายออก
-            raw_lines = [line.strip() for line in cleaned_text.split('\n')]
-            
-            # 2. กรองเอาเฉพาะบรรทัดที่มีข้อความจริง ๆ ออกมาก่อน (ลบบรรทัดว่างเดิมออกให้เกลี้ยง)
-            filtered_lines = [line for line in raw_lines if line]
-            
-            # 3. ลูปตรวจเช็คเพื่อแทรกบรรทัดว่างกลับคืนเฉพาะจุด
+            # --- เริ่มขั้นตอนการคัดกรองบรรทัดว่างแบบมีเงื่อนไขตามสั่ง ---
+            raw_lines = cleaned_text.split('\n')
             final_lines = []
-            for line in filtered_lines:
-                # เช็คว่าบรรทัดนี้ขึ้นต้นด้วยคำว่า "OPEN Problem P-" หรือไม่ (ตัวเล็ก/ตัวใหญ่จับได้หมด)
-                if line.lower().startswith("open problem p-"):
-                    # ถ้าไม่ใช่บรรทัดแรกสุดของข้อความทั้งหมด ให้แอบใส่ค่าว่างเข้าไปก่อนหน้า 1 บรรทัด
-                    if final_lines:
-                        final_lines.append("") 
-                
-                final_lines.append(line)
             
-            # ประกอบข้อความทั้งหมดกลับคืนมา
+            for i in range(len(raw_lines)):
+                current_line = raw_lines[i].strip()
+                
+                # เช็คว่าบรรทัดปัจจุบันเป็นบรรทัดว่างหรือไม่
+                if current_line == "":
+                    # ตรวจสอบบรรทัดถัดไป (ถ้ามีบรรทัดถัดไปจริง)
+                    if i + 1 < len(raw_lines):
+                        next_line = raw_lines[i+1].strip().lower()
+                        # กฎเหล็ก: ถ้าบรรทัดถัดไปขึ้นต้นด้วยคำว่า 'open' ให้เก็บความว่างนี้ไว้ ห้ามลบ!
+                        if next_line.startswith("open"):
+                            final_lines.append("")
+                            continue
+                    
+                    # ถ้าบรรทัดถัดไปไม่ใช่ 'open' หรือเป็นบรรทัดว่างติดๆ กันเกินไป -> ให้ข้าม (ลบทิ้ง)
+                    continue
+                
+                # ถ้าเป็นบรรทัดที่มีข้อความปกติ ให้ใส่ลงไปตามปกติ
+                final_lines = [line for line in final_lines if line != "" or (final_lines and final_lines[-1] != "")] # กันไม่ให้มีช่องว่างซ้ำซ้อน
+                final_lines.append(current_line)
+            
+            # เคลียร์ซับซ้อนรอบสุดท้าย: ปรับโครงสร้างข้อความ
+            # นำมาประกอบกลับคืน
             cleaned_text = '\n'.join(final_lines)
-        
-        # กล่องแสดงผลลัพธ์ที่ทำความสะอาดและจัดเรียงแถวใหม่แล้ว
+            
+            # ดักเคสพิเศษ: ถ้ามันติดกันอยู่แล้ว แต่ไม่มีบรรทัดว่าง แล้วเจอคำว่า open ให้แทรกเพิ่มให้ด้วย
+            # (กันไว้ดีกว่าแก้ เผื่อต้นทางไม่ได้เว้นวรรคมา ระบบจะเว้นให้เองเลยครับ)
+            lines_check = cleaned_text.split('\n')
+            final_perfect = []
+            for idx, line in enumerate(lines_check):
+                if line.strip().lower().startswith("open") and idx > 0 and final_perfect[-1] != "":
+                    final_perfect.append("")
+                final_perfect.append(line)
+                
+            cleaned_text = '\n'.join(final_perfect)
+
         st.text_area("ข้อความที่ทำความสะอาดแล้ว:", value=cleaned_text, height=280)
         
         if input_text:
-            st.success("✨ ทำความสะอาด จัดเรียงบรรทัด และเว้นวรรคกลุ่ม OPEN Problem ให้เรียบร้อยแล้ว!")
+            st.success("✨ จัดรูปแบบบรรทัดว่างสำหรับกลุ่มคำ OPEN เรียบร้อยแล้ว!")
