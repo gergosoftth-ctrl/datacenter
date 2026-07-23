@@ -5,14 +5,14 @@ import numpy as np
 from PIL import Image
 import easyocr
 
-# โหลด EasyOCR Reader มาเก็บไว้ใน Cache เพื่อไม่ให้โหลดใหม่ทุกครั้งที่กดปุ่ม (ช่วยให้ทำงานไวขึ้นมาก)
+# โหลด EasyOCR Reader เข้า Memory (ใช้ Cache เพื่อให้โหลดครั้งเดียวไวขึ้น)
 @st.cache_resource
 def load_ocr_reader():
     return easyocr.Reader(['en'], gpu=False)
 
 def run_app():
-    st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3 (EasyOCR Engine)")
-    st.write("เวอร์ชัน AI Deep Learning: อ่านจอดิจิทัล Dot Matrix และป้าย PAC ได้แม่นยำสูง")
+    st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
+    st.caption("powered by EasyOCR Deep Learning Engine")
 
     # ดึงตัว Reader มาเตรียมไว้
     reader = load_ocr_reader()
@@ -30,15 +30,15 @@ def run_app():
         
         for uploaded_file in uploaded_files:
             try:
-                # แปลงไฟล์รูปภาพเป็น numpy array เพื่อส่งให้ EasyOCR
+                # แปลงไฟล์รูปภาพเป็น numpy array ส่งให้ EasyOCR
                 original_img = Image.open(uploaded_file).convert('RGB')
                 img_np = np.array(original_img)
                 
-                # สั่ง EasyOCR อ่านข้อความทั้งหมดในภาพ (คืนค่าเป็นรายการข้อความพร้อมค่าความมั่นใจ)
+                # สั่ง EasyOCR อ่านข้อความทั้งหมดในภาพ
                 results = reader.readtext(img_np, detail=0)
                 full_text = " ".join(results)
 
-                # 🎯 1. เช็คเงื่อนไขว่าเป็น PAC 1 หรือ PAC 3 หรือไม่
+                # 🎯 1. เช็คป้ายว่าเป็น PAC 1 หรือ PAC 3 หรือไม่
                 has_pac1 = bool(re.search(r'P?AC\s*[-_]?\s*[1lI]\b', full_text, re.IGNORECASE))
                 has_pac3 = bool(re.search(r'P?AC\s*[-_]?\s*3\b', full_text, re.IGNORECASE))
 
@@ -48,12 +48,12 @@ def run_app():
                 elif has_pac3:
                     pac_found_type = "PAC 3"
 
-                # 🎯 2. ถ้าพบ PAC 1 หรือ PAC 3 ให้ทำการสกัดเอาเฉพาะตัวเลขยาวๆ บนจอ (เช่น 004674, 003085)
+                # 🎯 2. สกัดเอาเฉพาะชุดตัวเลขที่เป็นชั่วโมงการทำงานบนหน้าจอ LCD
                 if has_pac1 or has_pac3:
-                    # ดึงกลุ่มตัวเลขที่มีความยาว 3 ถึง 8 หลัก (คัดเอาตัวเลขบนจอ LCD)
+                    # ดึงกลุ่มตัวเลขที่มีความยาวตั้งแต่ 3 ถึง 8 หลัก (คัดเอาเลขชั่วโมงบนจอ LCD)
                     numbers_found = re.findall(r'\b\d{3,8}\b', full_text)
                     
-                    # ลบตัวเลขซ้ำโดยยังคงลำดับเดิมไว้
+                    # ลบตัวเลขซ้ำ
                     unique_numbers = list(dict.fromkeys(numbers_found))
                     numbers_combined = ", ".join(unique_numbers) if unique_numbers else "ไม่พบตัวเลขในจอ"
                     
@@ -82,7 +82,7 @@ def run_app():
             st.subheader("📋 ตารางสรุปผลข้อมูล")
             
             df = pd.DataFrame(all_extracted_data)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
             
             with st.expander("🔍 คลิกเพื่อดูข้อความทั้งหมดที่ EasyOCR อ่านได้จากรูปภาพ"):
                 for idx, row in df.iterrows():
@@ -96,5 +96,5 @@ def run_app():
                 data=csv_data,
                 file_name="pac_easyocr_data.csv",
                 mime="text/csv",
-                use_container_width=True
+                width="stretch"
             )
