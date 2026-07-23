@@ -120,10 +120,13 @@ else:
             
     elif st.session_state.selected_app == "image_ocr":
         try:
-            from apps import image_ocr  # เชื่อมแอปใหม่ในโฟลเดอร์ apps
+            import importlib
+            importlib.invalidate_caches() # ล้าง Cache การมองเห็นไฟล์ย่อย
+            from apps import image_ocr
             image_ocr.run_app()
-        except ModuleNotFoundError:
-            st.error("❌ ไม่พบไฟล์ `image_ocr.py` ในโฟลเดอร์ `apps` กรุณาสร้างไฟล์รอนะครับ")
+        except ModuleNotFoundError as e:
+            st.error(f"❌ ระบบหาไฟล์ไม่พบ: {str(e)}")
+            st.info("💡 กรุณาตรวจสอบว่าใน GitHub มีไฟล์ `apps/image_ocr.py` และ `apps/__init__.py` เรียบร้อยแล้ว"))
             
     elif st.session_state.selected_app == "supabase_db":
         st.title("🗂️ ระบบจัดการข้อมูลหลังบ้าน (Supabase)")
