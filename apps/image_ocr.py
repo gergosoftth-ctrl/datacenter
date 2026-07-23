@@ -21,7 +21,7 @@ def preprocess_lcd_clean(crop_img):
     # ขยายรูป 2.2 เท่า เพื่อให้ตัวหนังสือบนจอ LCD ชัดเจน
     resized = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
     
-    # เร่ง Contrast ถนอมฟอนต์
+    # ใช้ CLAHE ช่วยปรับความสว่างและคมชัดของตัวหนังสือ Dot-matrix
     clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(resized)
     
@@ -85,35 +85,42 @@ def check_black_label_pac(header_crop):
 
 def extract_lcd_metrics(raw_lcd_text):
     """
-    เงื่อนไขข้อ 2: สกัดตัวเลขจากจอ LCD ยืดหยุ่นสูงสุด
+    เงื่อนไขข้อ 2: สกัดตัวเลขจากจอ LCD ยืดหยุ่นสูงสุด ตัด 0 ข้างหน้าออก
+    รองรับตัวอักษรเพี้ยนและช่องว่างที่แทรกกลางตัวเลข
     """
     metrics = {}
     
+    # รายการ 11 หัวข้อหลักของ PAC 1 / PAC 3 ตามลำดับบนหน้าจอ
     labels_config = [
-        ("Active Operation", r"(?:Acti[vea]?|Aelive)\s*O[pe]rat"),
-        ("Cool Mode", r"Cool\s*Mode"),
-        ("Heat Mode", r"Heat\s*Mode"),
-        ("Humidify Mode", r"Humidif[y|ier]\s*Mode"),
-        ("De-Humidify Mode", r"De-?\s*Humidif[y|ier]\s*Mod"),
-        ("Fan Operation", r"Fan\s*O[pe]rat"),
-        ("Cool 1 Operation", r"(?:Cool|Geel)\s*1\s*O[pe]rat"),
-        ("Cool 2 Operation", r"(?:Cool|Geel)\s*2\s*O[pe]rat"),
-        ("Heat 1 Operation", r"Heat\s*1\s*O[pe]rat"),
-        ("Heat 2 Operation", r"Heat\s*2\s*O[pe]rat"),
-        ("Heater 1 Operation", r"Heater\s*1\s*O[pe]rat"),
-        ("Heater 2 Operation", r"Heater\s*2\s*O[pe]rat"),
-        ("Humidifier Operation", r"Humidifi[er]?\s*O[pe]rat"),
+        ("Active Operation", [r"(?:Acti[vea]?|HeLive|Live)\s*O[pe]rat"]),
+        ("Cool Mode", [r"Cool\s*Mo[de|ce]", r"Co[o0]l"]),
+        ("Heat Mode", [r"Heat\s*Mode"]),
+        ("Humidify Mode", [r"Humidif[y|ier]\s*Mo[de|ck]"]),
+        ("De-Humidify Mode", [r"De-?\s*Humidif[y|ier]\s*Mac"]),
+        ("Fan Operation", [r"(?:Fan|Ean)\s*O[pe]rat"]),
+        ("Cool 1 Operation", [r"(?:Cool|Geel|fool)\s*1\s*O[pe]rat"]),
+        ("Cool 2 Operation", [r"(?:Cool|Geel|fool)\s*2\s*O[pe]rat"]),
+        ("Heat 1 Operation", [r"Heat\s*1\s*O[pe]rat"]),
+        ("Heat 2 Operation", [r"Heat\s*2\s*O[pe]rat"]),
+        ("Humidifier Operation", [r"Humidifi[er]?\s*O[pe]rat"]),
     ]
     
     lines = raw_lcd_text.split('\n')
     
-    for label_title, pattern in labels_config:
+    for label_title, patterns in labels_config:
         for line in lines:
-            if re.search(pattern, line, re.IGNORECASE):
-                # สกัดข้อความส่วนท้ายหลังคำอธิบาย
-                parts = re.split(r'[:\s]+', line)
+            matched = False
+            for pat in patterns:
+                if re.search(pat, line, re.IGNORECASE):
+                    matched = True
+                    break
+            if matched:
+                # ลบช่องว่างที่แทรกระหว่างตัวเลข เช่น "1991 52" -> "199152"
+                line_clean = re.sub(r'(\d)\s+(\d)', r'\1\2', line)
+                line_clean = re.sub(r'([oOsiIl|eEsSzZbBqQg])\s+([0-9oOsiIl|eEsSzZbBqQg])', r'\1\2', line_clean)
+                
+                parts = re.split(r'[:\s]+', line_clean)
                 if len(parts) >= 2:
-                    # หาพาร์ทที่เป็นชุดตัวเลขหรือตัวเลขผสมอักษรเพี้ยน
                     for part in reversed(parts):
                         val_digit = clean_ocr_digits(part)
                         if val_digit is not None:
@@ -151,8 +158,8 @@ def run_app():
 
                     # 🎯 เงื่อนไขข้อ 1 & 3: หากพบ PAC 1 หรือ PAC 3 จากป้ายกรอบดำ ให้ดึงข้อมูลบนจอสีเขียว
                     if pac_type is not None:
-                        # Crop เฉพาะพื้นที่กรอบจอสีเขียวตรงกลาง (เจาะจงไม่ให้ติดปุ่มกดหรือขอบพลาสติก)
-                        lcd_crop = original_img.crop((int(width * 0.22), int(height * 0.40), int(width * 0.78), int(height * 0.66)))
+                        # Crop เฉพาะพื้นที่กรอบจอสีเขียวตรงกลาง
+                        lcd_crop = original_img.crop((int(width * 0.20), int(height * 0.39), int(width * 0.80), int(height * 0.67)))
                         processed_lcd = preprocess_lcd_clean(lcd_crop)
                         
                         # สแกนอ่านข้อความ LCD สองแบบเพื่อกันพลาด (PSM 6 และ PSM 4)
