@@ -15,13 +15,19 @@ def encode_image_to_base64(image):
 
 def call_gemini_vision_api(image, api_key):
     """
-    เรียกใช้ Gemini Vision API อ่านป้ายส่วนหัวและตัวเลขบนหน้าจอ LCD
-    ใช้โมเดลเสถียรมาตรฐาน gemini-1.5-flash
+    เรียกใช้ Gemini Vision API โดยลองรายชื่อโมเดลตามลำดับ (Auto-Fallback)
+    เพื่อให้รองรับทุกบัญชีผู้ใช้งาน 100%
     """
     base64_image = encode_image_to_base64(image)
     
-    # ใช้โมเดลมาตรฐาน gemini-1.5-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # รายชื่อโมเดลที่รองรับวิเคราะห์รูปภาพแบบเรียงลำดับ
+    model_candidates = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro-latest"
+    ]
     
     prompt = """
 คุณคือผู้เชี่ยวชาญด้าน OCR สำหรับสกัดข้อมูลจากเครื่องปรับอากาศควบคุมความชื้น (Precision Air Conditioner - PAC)
@@ -95,14 +101,23 @@ def call_gemini_vision_api(image, api_key):
     }
     
     headers = {'Content-Type': 'application/json'}
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    last_error_msg = ""
     
-    if response.status_code == 200:
-        res_data = response.json()
-        text_content = res_data['candidates'][0]['content']['parts'][0]['text']
-        return json.loads(text_content)
-    else:
-        raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
+    # วนลองสลับโมเดลอัตโนมัติหากโมเดลแรกไม่พบ
+    for model_name in model_candidates:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            if response.status_code == 200:
+                res_data = response.json()
+                text_content = res_data['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(text_content)
+            else:
+                last_error_msg = f"[{model_name}] Code {response.status_code}: {response.text}"
+        except Exception as e:
+            last_error_msg = str(e)
+            
+    raise Exception(f"ไม่สามารถเชื่อมต่อ Gemini API ได้: {last_error_msg}")
 
 def run_app():
     st.title("🤖 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3 (Gemini AI Vision)")
@@ -141,7 +156,7 @@ def run_app():
                 try:
                     original_img = Image.open(uploaded_file).convert('RGB')
                     
-                    # เรียกใช้ Gemini Vision API (gemini-1.5-flash)
+                    # เรียกใช้ Gemini Vision API พร้อมระบบสลับโมเดลอัตโนมัติ
                     result = call_gemini_vision_api(original_img, api_key)
                     pac_type = result.get("pac_type", "NONE")
                     
