@@ -7,28 +7,25 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 def preprocess_header_black_label(crop_img):
-    """ปรับแต่งและแปลงป้ายสีดำตัวหนังสือขาว ให้เป็นตัวอักษรสีดำบนพื้นหลังขาวคมชัดสูงสุด"""
+    """ปรับแต่งและแปลงป้ายสีดำตัวหนังสือขาว ให้คมชัด"""
     gray = np.array(crop_img.convert('L'))
-    # กลับสี (Invert)
     inverted = cv2.bitwise_not(gray)
-    # ใช้ Otsu Thresholding เพื่อตัดสัญญาณรบกวนและทำให้ตัวอักษรดำสนิท
     _, thresh = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(thresh)
 
-def preprocess_lcd_advanced(crop_img):
-    """ปรับแต่งหน้าจอ LCD สีเขียว (Liebert Dot-matrix Display) ให้ OCR อ่านง่ายขึ้น"""
+def preprocess_lcd_clahe(crop_img):
+    """ปรับแต่งหน้าจอ LCD สีเขียวด้วย CLAHE (ถนอมตัวหนังสือ Dot-matrix ไม่ให้แตกเป็นจุดรบกวน)"""
     img_np = np.array(crop_img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     
-    # ขยายขนาดภาพ 2 เท่า เพื่อให้ตัวอักษรลายจุด (Dot-matrix) ต่อกันชัดเจนขึ้น
-    resized = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    # ขยายรูป 1.8 เท่า
+    resized = cv2.resize(gray, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
     
-    # เร่ง Contrast คมชัด
-    enhanced = cv2.equalizeHist(resized)
+    # ใช้ CLAHE ช่วยปรับความสว่างและคมชัดของตัวหนังสือ Dot-matrix
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(resized)
     
-    # ทวิภาค (Thresholding) แยกตัวอักษรออกจากพื้นหลังสีเขียว
-    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return thresh
+    return Image.fromarray(enhanced)
 
 def check_black_label_pac(header_crop):
     """
@@ -36,23 +33,30 @@ def check_black_label_pac(header_crop):
     """
     processed_header = preprocess_header_black_label(header_crop)
     
-    # ลองสแกนด้วย PSM 11 (Sparse text) และ PSM 6 (Block text) เพื่อเพิ่มความแม่นยำ
-    text11 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 11')
-    text6 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 6')
-    combined_text = f"{text11}\n{text6}"
+    # สแกนด้วย PSM 11, PSM 6 และ PSM 3 เพื่อเก็บข้อความครบทุกบรรทัด
+    t11 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 11')
+    t6 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 6')
+    t3 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 3')
+    
+    raw_text = f"{t11}\n{t6}\n{t3}"
+    
+    # รวมข้อความ บรรทัด และลบอักขระพิเศษเพื่อทำความสะอาดก่อนสแกน Regex
+    clean_text = re.sub(r'[\r\n\t]+', ' ', raw_text)
+    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', clean_text)
+    clean_text = re.sub(r'\s+', ' ', clean_text)
 
-    # ค้นหา PAC 1 หรือ PAC 3
-    has_pac1 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*[1lI|]\b', combined_text, re.IGNORECASE))
-    has_pac3 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*3\b', combined_text, re.IGNORECASE))
+    # เช็คเฉพาะ PAC 1 และ PAC 3 (รองรับ PAC 1, PAC1, PAC 001003, PAC 3, PAC3 ฯลฯ)
+    has_pac1 = bool(re.search(r'\bP[A4]C\s*0*1\b', clean_text, re.IGNORECASE))
+    has_pac3 = bool(re.search(r'\bP[A4]C\s*0*3\b|\bP[A4]C.*?0*3\b', clean_text, re.IGNORECASE))
 
     if has_pac1 and not has_pac3:
-        return "PAC 1", combined_text.strip()
+        return "PAC 1", t6.strip() if t6.strip() else raw_text.strip()
     elif has_pac3 and not has_pac1:
-        return "PAC 3", combined_text.strip()
+        return "PAC 3", t6.strip() if t6.strip() else raw_text.strip()
     elif has_pac1 and has_pac3:
-        return "PAC 1 / PAC 3", combined_text.strip()
+        return "PAC 1 / PAC 3", t6.strip() if t6.strip() else raw_text.strip()
 
-    return None, combined_text.strip()
+    return None, t6.strip() if t6.strip() else raw_text.strip()
 
 def extract_lcd_metrics(raw_lcd_text):
     """
@@ -62,7 +66,7 @@ def extract_lcd_metrics(raw_lcd_text):
     
     # รายการ Label บนหน้าจอ LCD และ Regex ยืดหยุ่นรองรับการอ่านเพี้ยนของ OCR
     labels_config = [
-        ("Active Operation", r"Acti[vea]\s*O[pe]rat[io]n"),
+        ("Active Operation", r"Acti[vea]?\s*O[pe]rat[io]n"),
         ("Cool Mode", r"Cool\s*Mode"),
         ("Heat Mode", r"Heat\s*Mode"),
         ("Humidify Mode", r"Humidif[y|ier]\s*Mode"),
@@ -83,11 +87,11 @@ def extract_lcd_metrics(raw_lcd_text):
         for line in lines:
             if re.search(pattern, line, re.IGNORECASE):
                 # ค้นหาชุดตัวเลขหลังคำอธิบาย
-                # 0*(\d+) จะช่วยละทิ้งเลข 0 ที่นำหน้า เช่น 004674 -> ได้ 4674, 000000 -> ได้ 0
+                # 0*(\d+) ช่วยละทิ้งเลข 0 ที่นำหน้า เช่น 004674 -> ได้ 4674, 000000 -> ได้ 0
                 num_match = re.search(r'[:\s]+0*(\d+)\s*(?:hrs)?', line, re.IGNORECASE)
                 if num_match:
                     val_str = num_match.group(1)
-                    val_int = int(val_str) # แปลงเป็น int เพื่อลบ 0 ข้างหน้าออกแน่นอน
+                    val_int = int(val_str)
                     metrics[label_title] = val_int
                     break
                     
@@ -122,11 +126,14 @@ def run_app():
                     if pac_type is not None:
                         # Crop หน้าจอ LCD สีเขียว
                         lcd_crop = original_img.crop((int(width * 0.15), int(height * 0.35), int(width * 0.85), int(height * 0.75)))
-                        processed_lcd = preprocess_lcd_advanced(lcd_crop)
+                        processed_lcd = preprocess_lcd_clahe(lcd_crop)
                         
-                        # สแกนอ่านข้อความ LCD
-                        lcd_raw_text = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 6')
-                        metrics = extract_lcd_metrics(lcd_raw_text)
+                        # สแกนอ่านข้อความ LCD สองแบบเพื่อกันพลาด (PSM 6 และ PSM 4)
+                        raw_lcd6 = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 6')
+                        raw_lcd4 = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 4')
+                        combined_lcd = f"{raw_lcd6}\n{raw_lcd4}"
+                        
+                        metrics = extract_lcd_metrics(combined_lcd)
                         
                         if metrics:
                             formatted_metrics = " | ".join([f"{k} = {v}" for k, v in metrics.items()])
@@ -141,7 +148,7 @@ def run_app():
                             "สถานะ": status_text,
                             "สรุปค่าบนหน้าจอ LCD": formatted_metrics,
                             "ข้อความดิบป้ายส่วนหัว": raw_header_text,
-                            "ข้อความดิบ LCD": lcd_raw_text.strip()
+                            "ข้อความดิบ LCD": raw_lcd6.strip()
                         }
                         
                         for k, v in metrics.items():
