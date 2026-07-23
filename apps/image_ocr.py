@@ -16,11 +16,12 @@ def encode_image_to_base64(image):
 def call_gemini_vision_api(image, api_key):
     """
     เรียกใช้ Gemini Vision API อ่านป้ายส่วนหัวและตัวเลขบนหน้าจอ LCD
-    ส่งคำตอบกลับเป็น JSON รูปแบบมาตรฐาน
+    ใช้โมเดลเสถียรมาตรฐาน gemini-1.5-flash
     """
     base64_image = encode_image_to_base64(image)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    # ใช้โมเดลมาตรฐาน gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
     prompt = """
 คุณคือผู้เชี่ยวชาญด้าน OCR สำหรับสกัดข้อมูลจากเครื่องปรับอากาศควบคุมความชื้น (Precision Air Conditioner - PAC)
@@ -140,7 +141,7 @@ def run_app():
                 try:
                     original_img = Image.open(uploaded_file).convert('RGB')
                     
-                    # เรียกใช้ Gemini Vision API
+                    # เรียกใช้ Gemini Vision API (gemini-1.5-flash)
                     result = call_gemini_vision_api(original_img, api_key)
                     pac_type = result.get("pac_type", "NONE")
                     
