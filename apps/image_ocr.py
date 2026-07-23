@@ -3,8 +3,19 @@ import pandas as pd
 import re
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
+
+def preprocess_header_black_label(crop_img):
+    """ปรับแต่งและกลับสีป้ายสีดำตัวหนังสือขาว ให้กลายเป็นตัวหนังสือดำพื้นขาว"""
+    gray = crop_img.convert('L')
+    # กลับสีภาพ (Invert): ดำ -> ขาว, ขาว -> ดำ
+    inverted = ImageOps.invert(gray)
+    
+    # เพิ่ม Contrast ความคมชัด
+    enhancer = ImageEnhance.Contrast(inverted)
+    enhanced = enhancer.enhance(3.0)
+    return enhanced
 
 def preprocess_lcd(crop_img):
     """ปรับแต่งภาพหน้าจอ LCD สีเขียวให้อ่านตัวเลขได้คมชัดที่สุด"""
@@ -14,13 +25,11 @@ def preprocess_lcd(crop_img):
     # ขยายขนาด 2 เท่า
     resized = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     
-    # เพิ่มความเข้มคมชัด (Contrast & Adaptive Thresholding)
+    # Adaptive Thresholding & Closing จุดดอทเมตริกซ์
     thresh = cv2.adaptiveThreshold(
         resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
         cv2.THRESH_BINARY_INV, 21, 10
     )
-    
-    # ถมจุดพิกเซลจอดอทเมตริกซ์ที่ขาดให้เชื่อมติดกันเป็นตัวเลข
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     
@@ -29,7 +38,7 @@ def preprocess_lcd(crop_img):
 
 def run_app():
     st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
-    st.caption("เวอร์ชันปรับแต่งโซนเฉพาะ: ไม่กิน RAM คลาวด์ และอ่านหน้าจอดิจิทัล")
+    st.caption("เวอร์ชันรองรับป้ายสีดำตัวหนังสือขาว (Inverted Label OCR)")
 
     uploaded_files = st.file_uploader(
         "📥 เลือกไฟล์รูปภาพ (เลือกพร้อมกันได้หลายไฟล์):", 
@@ -48,16 +57,18 @@ def run_app():
                 width, height = original_img.size
 
                 # -------------------------------------------------------------
-                # 🎯 โซนที่ 1: Crop ป้าย PAC ด้านบน (กล่องดำใหญ่)
+                # 🎯 โซนที่ 1: Crop ป้าย PAC ด้านบน และทำการกลับสี (Invert Color)
                 # -------------------------------------------------------------
                 header_crop = original_img.crop((0, 0, width, int(height * 0.35)))
                 
-                # เร่ง Contrast สำหรับป้ายดำ-ขาว
-                gray_header = header_crop.convert('L')
-                enhancer = ImageEnhance.Contrast(gray_header)
-                enhanced_header = enhancer.enhance(3.0)
+                # 1. อ่านแบบกลับสี (เพื่ออ่านป้ายดำตัวหนังสือขาว)
+                inverted_header = preprocess_header_black_label(header_crop)
+                text_inv = pytesseract.image_to_string(inverted_header, config=r'--oem 3 --psm 6')
                 
-                header_text = pytesseract.image_to_string(enhanced_header, config=r'--oem 3 --psm 6')
+                # 2. อ่านแบบปกติสำรองไว้
+                text_norm = pytesseract.image_to_string(header_crop, config=r'--oem 3 --psm 11')
+                
+                header_text = text_inv + " " + text_norm
 
                 # ดักจับ PAC 1 หรือ PAC 3
                 has_pac1 = bool(re.search(r'P?AC\s*[-_]?\s*[1lI]\b', header_text, re.IGNORECASE))
@@ -76,11 +87,10 @@ def run_app():
                     lcd_crop = original_img.crop((int(width * 0.15), int(height * 0.30), int(width * 0.85), int(height * 0.70)))
                     processed_lcd = preprocess_lcd(lcd_crop)
                     
-                    # บังคับสแกนหาเฉพาะตัวเลขบนหน้าจอ LCD
                     config_digits = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
                     lcd_text = pytesseract.image_to_string(processed_lcd, config=config_digits)
 
-                    # ดึงกลุ่มตัวเลขความยาว 3-8 หลัก (ชั่วโมงการทำงาน)
+                    # ดึงกลุ่มตัวเลขความยาว 3-8 หลัก
                     numbers_found = re.findall(r'\b\d{3,8}\b', lcd_text)
                     unique_numbers = list(dict.fromkeys(numbers_found))
                     numbers_combined = ", ".join(unique_numbers) if unique_numbers else "ไม่พบตัวเลขในจอ"
