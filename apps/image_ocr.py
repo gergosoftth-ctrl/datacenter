@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
-import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance
 import pytesseract
 
 def process_image_for_lcd(img):
@@ -49,8 +48,7 @@ def run_app():
                     raw_text_orig = pytesseract.image_to_string(original_img, config=r'--oem 3 --psm 3')
                     raw_text += "\n" + raw_text_orig
 
-                # 🎯 เงื่อนไขใหม่: เช็คเฉพาะ PAC 1 หรือ PAC 3 เท่านั้น!
-                # รองรับ PAC 1, PAC1, PAC 3, PAC3, PAC-1, PAC-3
+                # 🎯 เงื่อนไข: เช็คเฉพาะ PAC 1 หรือ PAC 3 เท่านั้น!
                 pac_pattern = r'pac\s*[-_]?\s*[13]\b'
                 has_pac = bool(re.search(pac_pattern, raw_text, re.IGNORECASE))
                 
@@ -61,10 +59,8 @@ def run_app():
                     pac_found_type = f"PAC {match.group(1)}"
 
                 if has_pac:
-                    # ดึงตัวเลขทั้งหมดที่เจอในภาพ (รวมถึงตัวเลขบนจอ LCD เช่น 004674, 24)
+                    # ดึงตัวเลขทั้งหมดที่เจอในภาพ
                     numbers_found = re.findall(r'\b\d+(?:\.\d+)?\b', raw_text)
-                    
-                    # กรองเอาเฉพาะตัวเลขที่มีความยาว หรือตัวเลขวัดค่า (ตัดตัวเลขย่อยๆ ออก)
                     numbers_combined = ", ".join(numbers_found) if numbers_found else "ไม่พบตัวเลข"
                     
                     all_extracted_data.append({
@@ -72,7 +68,7 @@ def run_app():
                         "ประเภทที่พบ": pac_found_type,
                         "สถานะ": "✅ ผ่าน (พบ " + pac_found_type + ")",
                         "ตัวเลขทั้งหมดในภาพ": numbers_combined,
-                        "ข้อความดิบที่ OCR สแกนได้": raw_text.strip().replace('\n', ' | ')
+                        "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' | ')
                     })
                 else:
                     all_extracted_data.append({
@@ -94,11 +90,11 @@ def run_app():
             df = pd.DataFrame(all_extracted_data)
             st.dataframe(df, use_container_width=True)
             
-            # เปิดดูข้อความดิบที่สแกนได้เพื่อเช็คความถูกต้อง
+            # เปิดดูข้อความดิบที่สแกนได้เพื่อเช็คความถูกต้อง (แก้ไขชื่อคอลัมน์ให้ตรงกันแล้ว)
             with st.expander("🔍 คลิกเพื่อดูข้อความดิบที่ OCR อ่านได้จากแต่ละรูป"):
                 for idx, row in df.iterrows():
                     st.write(f"📁 **{row['ชื่อไฟล์']}** ({row['สถานะ']})")
-                    st.code(row['ข้อความดิบที่ OCR สแกนได้'])
+                    st.code(row['ข้อความดิบที่สแกนได้'])
                     st.markdown("---")
             
             csv_data = df.to_csv(index=False).encode('utf-8-sig')
