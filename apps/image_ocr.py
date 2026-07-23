@@ -13,19 +13,22 @@ def preprocess_header_black_label(crop_img):
     _, thresh = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(thresh)
 
-def preprocess_lcd_clean(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียว (เน้นเพิ่มความคมชัดและขยายขนาดสำหรับจอ Liebert)"""
+def preprocess_lcd_clahe(crop_img):
+    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ CLAHE"""
     img_np = np.array(crop_img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    
-    # ขยายรูป 2.2 เท่า เพื่อให้ตัวหนังสือบนจอ LCD ชัดเจน
     resized = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
-    
-    # ใช้ CLAHE ช่วยปรับความสว่างและคมชัดของตัวหนังสือ Dot-matrix
     clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(resized)
-    
     return Image.fromarray(enhanced)
+
+def preprocess_lcd_adaptive(crop_img):
+    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ Adaptive Thresholding (คมกริบสำหรับฟอนต์ Dot-matrix)"""
+    img_np = np.array(crop_img)
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    resized = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    thresh = cv2.adaptiveThreshold(resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 6)
+    return Image.fromarray(thresh)
 
 def clean_ocr_digits(val_str):
     """
@@ -90,13 +93,12 @@ def extract_lcd_metrics(raw_lcd_text):
     """
     metrics = {}
     
-    # รายการ 11 หัวข้อหลักของ PAC 1 / PAC 3 ตามลำดับบนหน้าจอ
     labels_config = [
         ("Active Operation", [r"(?:Acti[vea]?|HeLive|Live)\s*O[pe]rat"]),
         ("Cool Mode", [r"Cool\s*Mo[de|ce]", r"Co[o0]l"]),
-        ("Heat Mode", [r"Heat\s*Mode"]),
+        ("Heat Mode", [r"Heat\s*Mo[de|se]"]),
         ("Humidify Mode", [r"Humidif[y|ier]\s*Mo[de|ck]"]),
-        ("De-Humidify Mode", [r"De-?\s*Humidif[y|ier]\s*Mac"]),
+        ("De-Humidify Mode", [r"De-?\s*Humidif[y|ier]\s*Mo[de|ac]"]),
         ("Fan Operation", [r"(?:Fan|Ean)\s*O[pe]rat"]),
         ("Cool 1 Operation", [r"(?:Cool|Geel|fool)\s*1\s*O[pe]rat"]),
         ("Cool 2 Operation", [r"(?:Cool|Geel|fool)\s*2\s*O[pe]rat"]),
@@ -160,13 +162,15 @@ def run_app():
                     if pac_type is not None:
                         # Crop เฉพาะพื้นที่กรอบจอสีเขียวตรงกลาง
                         lcd_crop = original_img.crop((int(width * 0.20), int(height * 0.39), int(width * 0.80), int(height * 0.67)))
-                        processed_lcd = preprocess_lcd_clean(lcd_crop)
                         
-                        # สแกนอ่านข้อความ LCD สองแบบเพื่อกันพลาด (PSM 6 และ PSM 4)
-                        raw_lcd6 = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 6')
-                        raw_lcd4 = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 4')
-                        combined_lcd = f"{raw_lcd6}\n{raw_lcd4}"
+                        # สแกนคู่ 2 อัลกอริทึม (CLAHE + Adaptive Thresholding) เพื่อความคมชัดสูงสุด
+                        img_clahe = preprocess_lcd_clahe(lcd_crop)
+                        img_adaptive = preprocess_lcd_adaptive(lcd_crop)
                         
+                        raw_lcd_clahe = pytesseract.image_to_string(img_clahe, config=r'--oem 3 --psm 6')
+                        raw_lcd_adaptive = pytesseract.image_to_string(img_adaptive, config=r'--oem 3 --psm 6')
+                        
+                        combined_lcd = f"{raw_lcd_clahe}\n{raw_lcd_adaptive}"
                         metrics = extract_lcd_metrics(combined_lcd)
                         
                         if metrics:
@@ -182,7 +186,7 @@ def run_app():
                             "สถานะ": status_text,
                             "สรุปค่าบนหน้าจอ LCD": formatted_metrics,
                             "ข้อความดิบป้ายส่วนหัว": raw_header_text,
-                            "ข้อความดิบ LCD": raw_lcd6.strip()
+                            "ข้อความดิบ LCD": raw_lcd_clahe.strip()
                         }
                         
                         for k, v in metrics.items():
