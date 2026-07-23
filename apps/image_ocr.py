@@ -9,36 +9,63 @@ import pytesseract
 def preprocess_header_black_label(crop_img):
     """ปรับแต่งและกลับสีป้ายสีดำตัวหนังสือขาว ให้กลายเป็นตัวหนังสือดำพื้นขาว"""
     gray = crop_img.convert('L')
-    # กลับสีภาพ (Invert): ดำ -> ขาว, ขาว -> ดำ
     inverted = ImageOps.invert(gray)
-    
-    # เพิ่ม Contrast ความคมชัด
     enhancer = ImageEnhance.Contrast(inverted)
-    enhanced = enhancer.enhance(3.0)
-    return enhanced
+    return enhancer.enhance(3.0)
 
-def preprocess_lcd(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียวให้อ่านตัวเลขได้คมชัดที่สุด"""
+def preprocess_lcd_screen(crop_img):
+    """ปรับแต่งภาพหน้าจอ LCD Dot Matrix เพื่อให้อ่านข้อความตารางได้แม่นยำ"""
     img_np = np.array(crop_img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     
-    # ขยายขนาด 2 เท่า
-    resized = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # 1. ขยายขนาดรูป 3 เท่า
+    resized = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     
-    # Adaptive Thresholding & Closing จุดดอทเมตริกซ์
-    thresh = cv2.adaptiveThreshold(
-        resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 21, 10
-    )
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # 2. ปรับ Contrast ให้คมชัด
+    alpha = 2.0  # Simple Contrast Control
+    beta = 10    # Brightness Control
+    contrast_img = cv2.convertScaleAbs(resized, alpha=alpha, beta=beta)
     
-    final_img = cv2.bitwise_not(closed)
-    return final_img
+    # 3. Dilation ถมเส้นตัวหนังสือ Dot Matrix ให้หนาขึ้น
+    kernel = np.ones((2,2), np.uint8)
+    dilated_img = cv2.erode(contrast_img, kernel, iterations=1) # Erode On Black text = Dilation on black lines
+    
+    return dilated_img
+
+def extract_lcd_metrics(raw_lcd_text):
+    """สกัดเฉพาะค่าหัวข้อการทำงานชั่วโมง (Hours) เช่น Active Operation = 4674"""
+    metrics = {}
+    
+    # รายการหัวข้อที่เราต้องการค้นหาจากหน้าจอ Liebert
+    labels = [
+        "Active Operation",
+        "Cool Mode",
+        "Heat Mode",
+        "Humidify Mode",
+        "De-Humidify Mode",
+        "Fan Operation",
+        "Cool 1 Operation",
+        "Cool 2 Operation",
+        "Heat 1 Operation",
+        "Heat 2 Operation",
+        "Humidifier Operation"
+    ]
+    
+    for label in labels:
+        # Regex หาชื่อหัวข้อตามด้วยตัวเลขชั่วโมง (ตัดเลข 0 ข้างหน้าออก เช่น 004674 -> 4674)
+        # ตัวอย่างแพทเทิร์น: Active\s*Operation.*?\s*0*(\d+)
+        pattern = re.escape(label).replace(r'\ ', r'\s*') + r'.*?\b0*(\d+)\s*(?:hrs)?'
+        match = re.search(pattern, raw_lcd_text, re.IGNORECASE)
+        
+        if match:
+            value = match.group(1)
+            metrics[label] = int(value) if value else 0
+            
+    return metrics
 
 def run_app():
     st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
-    st.caption("เวอร์ชันรองรับป้ายสีดำตัวหนังสือขาว (Inverted Label OCR)")
+    st.caption("เวอร์ชันดึงค่าชั่วโมงการทำงาน (Run Hours) บนหน้าจอ Liebert LCD")
 
     uploaded_files = st.file_uploader(
         "📥 เลือกไฟล์รูปภาพ (เลือกพร้อมกันได้หลายไฟล์):", 
@@ -57,20 +84,13 @@ def run_app():
                 width, height = original_img.size
 
                 # -------------------------------------------------------------
-                # 🎯 โซนที่ 1: Crop ป้าย PAC ด้านบน และทำการกลับสี (Invert Color)
+                # 🎯 โซนที่ 1: Crop ป้าย PAC ด้านบน
                 # -------------------------------------------------------------
                 header_crop = original_img.crop((0, 0, width, int(height * 0.35)))
-                
-                # 1. อ่านแบบกลับสี (เพื่ออ่านป้ายดำตัวหนังสือขาว)
                 inverted_header = preprocess_header_black_label(header_crop)
-                text_inv = pytesseract.image_to_string(inverted_header, config=r'--oem 3 --psm 6')
-                
-                # 2. อ่านแบบปกติสำรองไว้
-                text_norm = pytesseract.image_to_string(header_crop, config=r'--oem 3 --psm 11')
-                
-                header_text = text_inv + " " + text_norm
+                header_text = pytesseract.image_to_string(inverted_header, config=r'--oem 3 --psm 6')
 
-                # ดักจับ PAC 1 หรือ PAC 3
+                # เช็คป้าย PAC 1 หรือ PAC 3
                 has_pac1 = bool(re.search(r'P?AC\s*[-_]?\s*[1lI]\b', header_text, re.IGNORECASE))
                 has_pac3 = bool(re.search(r'P?AC\s*[-_]?\s*3\b', header_text, re.IGNORECASE))
 
@@ -81,36 +101,45 @@ def run_app():
                     pac_found_type = "PAC 3"
 
                 # -------------------------------------------------------------
-                # 🎯 โซนที่ 2: Crop หน้าจอ LCD สีเขียวตรงกลาง
+                # 🎯 โซนที่ 2: Crop หน้าจอ LCD สีเขียว
                 # -------------------------------------------------------------
                 if has_pac1 or has_pac3:
-                    lcd_crop = original_img.crop((int(width * 0.15), int(height * 0.30), int(width * 0.85), int(height * 0.70)))
-                    processed_lcd = preprocess_lcd(lcd_crop)
+                    # ตัดโฟกัสเฉพาะกรอบหน้าจอ LCD (25% - 68% ของความสูง)
+                    lcd_crop = original_img.crop((int(width * 0.20), int(height * 0.38), int(width * 0.80), int(height * 0.68)))
+                    processed_lcd = preprocess_lcd_screen(lcd_crop)
                     
-                    config_digits = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
-                    lcd_text = pytesseract.image_to_string(processed_lcd, config=config_digits)
+                    # สแกนข้อความในหน้าจอ
+                    lcd_raw_text = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 6')
+                    
+                    # สกัดจับคู่ Key-Value
+                    metrics = extract_lcd_metrics(lcd_raw_text)
+                    
+                    # จัดรูปแบบการแสดงผล Key = Value
+                    if metrics:
+                        formatted_metrics = " | ".join([f"{k} = {v}" for k, v in metrics.items()])
+                    else:
+                        formatted_metrics = "สแกนเจอจอ LCD แต่จับคู่หัวข้อชั่วโมงไม่สำเร็จ"
 
-                    # ดึงกลุ่มตัวเลขความยาว 3-8 หลัก
-                    numbers_found = re.findall(r'\b\d{3,8}\b', lcd_text)
-                    unique_numbers = list(dict.fromkeys(numbers_found))
-                    numbers_combined = ", ".join(unique_numbers) if unique_numbers else "ไม่พบตัวเลขในจอ"
-
-                    all_extracted_data.append({
+                    row_data = {
                         "ชื่อไฟล์": uploaded_file.name,
                         "ประเภทที่พบ": pac_found_type,
                         "สถานะ": "✅ ผ่าน (พบ " + pac_found_type + ")",
-                        "ตัวเลขบนจอ LCD": numbers_combined,
-                        "ข้อความป้ายส่วนบน": header_text.strip(),
-                        "ตัวเลขที่สแกนได้ในจอ LCD": lcd_text.strip()
-                    })
+                        "สรุปค่าบนหน้าจอ LCD": formatted_metrics,
+                        "ข้อความดิบ LCD": lcd_raw_text.strip()
+                    }
+                    
+                    # ใส่คอลัมน์แยกแต่ละค่าลง DataFrame เพื่อสะดวกต่อการ Export CSV
+                    for k, v in metrics.items():
+                        row_data[k] = v
+
+                    all_extracted_data.append(row_data)
                 else:
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
                         "ประเภทที่พบ": "-",
                         "สถานะ": "❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3)",
-                        "ตัวเลขบนจอ LCD": "-",
-                        "ข้อความป้ายส่วนบน": header_text.strip() if header_text.strip() else "อ่านไม่ได้",
-                        "ตัวเลขที่สแกนได้ในจอ LCD": "ข้ามการอ่าน"
+                        "สรุปค่าบนหน้าจอ LCD": "-",
+                        "ข้อความดิบ LCD": "ข้ามการอ่าน"
                     })
                     
             except Exception as e:
@@ -122,20 +151,22 @@ def run_app():
             st.subheader("📋 ตารางสรุปผลข้อมูล")
             
             df = pd.DataFrame(all_extracted_data)
-            st.dataframe(df[["ชื่อไฟล์", "ประเภทที่พบ", "สถานะ", "ตัวเลขบนจอ LCD"]], width="stretch")
             
-            with st.expander("🔍 คลิกเพื่อดูรายละเอียดข้อความที่ OCR อ่านได้"):
+            # คัดเลือกคอลัมน์ที่จะโชว์หน้าแรก
+            display_cols = ["ชื่อไฟล์", "ประเภทที่พบ", "สถานะ", "สรุปค่าบนหน้าจอ LCD"]
+            st.dataframe(df[display_cols], width="stretch")
+            
+            with st.expander("🔍 คลิกเพื่อดูข้อความดิบที่สแกนได้จากหน้าจอ LCD"):
                 for idx, row in df.iterrows():
                     st.write(f"📁 **{row['ชื่อไฟล์']}** ({row['สถานะ']})")
-                    st.write(f"🏷️ **ข้อความป้ายบน:** `{row['ข้อความป้ายส่วนบน']}`")
-                    st.write(f"📟 **ตัวเลขในจอ LCD:** `{row['ตัวเลขที่สแกนได้ในจอ LCD']}`")
+                    st.code(row['ข้อความดิบ LCD'])
                     st.markdown("---")
             
             csv_data = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="📥 ดาวน์โหลดข้อมูลทั้งหมดเป็น CSV",
+                label="📥 ดาวน์โหลดข้อมูลสรุปทั้งหมดเป็น CSV",
                 data=csv_data,
-                file_name="pac_ocr_data.csv",
+                file_name="pac_lcd_metrics.csv",
                 mime="text/csv",
                 width="stretch"
             )
