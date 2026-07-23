@@ -6,7 +6,7 @@ import pytesseract
 
 def run_app():
     st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ (Image OCR)")
-    st.write("เวอร์ชันทดสอบ: อัปโหลดได้หลายรูปพร้อมกัน ดึงตัวเลขทั้งหมดเฉพาะรูปที่มีคำว่า PAC1 หรือ PAC5")
+    st.write("เวอร์ชันทดสอบ: อัปโหลดได้หลายรูปพร้อมกัน ดึงตัวเลขทั้งหมดเฉพาะรูปที่มีคำว่า PAC1 หรือ PAC3")
 
     # 1. ปรับช่องอัปโหลดให้รองรับหลายรูปพร้อมกันด้วย accept_multiple_files=True
     uploaded_files = st.file_uploader(
@@ -44,7 +44,7 @@ def run_app():
                     # เก็บผลลัพธ์ลงในลิสต์ข้อมูล
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
-                        "สถานะเงื่อนไข": "ผ่าน (พบ PAC1/PAC5)",
+                        "สถานะเงื่อนไข": "ผ่าน (พบ PAC1/PAC3)",
                         "ตัวเลขทั้งหมดที่พบ": numbers_combined,
                         "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' ')
                     })
