@@ -23,7 +23,7 @@ def preprocess_lcd_clahe(crop_img):
     return Image.fromarray(enhanced)
 
 def preprocess_lcd_adaptive(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ Adaptive Thresholding (คมกริบสำหรับฟอนต์ Dot-matrix)"""
+    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ Adaptive Thresholding"""
     img_np = np.array(crop_img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     resized = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
@@ -32,7 +32,7 @@ def preprocess_lcd_adaptive(crop_img):
 
 def clean_ocr_digits(val_str):
     """
-    เงื่อนไขข้อ 2: แปลงตัวอักษรที่ OCR อ่านเพี้ยนกลับเป็นตัวเลขบริสุทธิ์
+    แปลงตัวอักษรที่ OCR อ่านเพี้ยนกลับเป็นตัวเลขบริสุทธิ์
     และตัดเลข 0 ข้างหน้าออก (เช่น 004674 -> 4674, 000000 -> 0)
     """
     charmap = {
@@ -86,12 +86,15 @@ def check_black_label_pac(header_crop):
 
     return None, t6.strip() if t6.strip() else raw_text.strip()
 
-def extract_lcd_metrics(raw_lcd_text):
+def extract_lcd_metrics_detailed(raw_lcd_text):
     """
-    เงื่อนไขข้อ 2: สกัดตัวเลขจากจอ LCD ยืดหยุ่นสูงสุด ตัด 0 ข้างหน้าออก
-    รองรับตัวอักษรเพี้ยนและช่องว่างที่แทรกกลางตัวเลข
+    เงื่อนไขข้อ 2: สกัดตารางรายละเอียดแบบเปรียบเทียบ
+    - รายการ (Mode / Operation)
+    - ค่าในรูปภาพดิบ (เช่น 004674 hrs)
+    - ค่าที่สกัดได้ (ตัด 0 นำหน้า) (เช่น 4674)
     """
-    metrics = {}
+    detailed_rows = []
+    summary_dict = {}
     
     labels_config = [
         ("Active Operation", [r"(?:Acti[vea]?|HeLive|Live)\s*O[pe]rat"]),
@@ -110,6 +113,9 @@ def extract_lcd_metrics(raw_lcd_text):
     lines = raw_lcd_text.split('\n')
     
     for label_title, patterns in labels_config:
+        raw_val_str = "-"
+        clean_val_int = "-"
+        
         for line in lines:
             matched = False
             for pat in patterns:
@@ -117,7 +123,6 @@ def extract_lcd_metrics(raw_lcd_text):
                     matched = True
                     break
             if matched:
-                # ลบช่องว่างที่แทรกระหว่างตัวเลข เช่น "1991 52" -> "199152"
                 line_clean = re.sub(r'(\d)\s+(\d)', r'\1\2', line)
                 line_clean = re.sub(r'([oOsiIl|eEsSzZbBqQg])\s+([0-9oOsiIl|eEsSzZbBqQg])', r'\1\2', line_clean)
                 
@@ -126,12 +131,20 @@ def extract_lcd_metrics(raw_lcd_text):
                     for part in reversed(parts):
                         val_digit = clean_ocr_digits(part)
                         if val_digit is not None:
-                            metrics[label_title] = val_digit
+                            raw_val_str = part + " hrs" if not part.endswith("hrs") else part
+                            clean_val_int = val_digit
                             break
-                    if label_title in metrics:
+                    if clean_val_int != "-":
                         break
-                    
-    return metrics
+                        
+        detailed_rows.append({
+            "รายการ (Mode / Operation)": label_title,
+            "ค่าในรูปภาพดิบ": raw_val_str,
+            "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": clean_val_int
+        })
+        summary_dict[label_title] = clean_val_int
+        
+    return detailed_rows, summary_dict
 
 def run_app():
     st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
@@ -143,7 +156,8 @@ def run_app():
         accept_multiple_files=True
     )
 
-    all_extracted_data = []
+    all_summary_data = []
+    all_detailed_export = []
 
     if uploaded_files:
         st.markdown(f"📸 **กำลังประมวลผลรูปภาพทั้งหมด {len(uploaded_files)} ไฟล์...**")
@@ -163,7 +177,6 @@ def run_app():
                         # Crop เฉพาะพื้นที่กรอบจอสีเขียวตรงกลาง
                         lcd_crop = original_img.crop((int(width * 0.20), int(height * 0.39), int(width * 0.80), int(height * 0.67)))
                         
-                        # สแกนคู่ 2 อัลกอริทึม (CLAHE + Adaptive Thresholding) เพื่อความคมชัดสูงสุด
                         img_clahe = preprocess_lcd_clahe(lcd_crop)
                         img_adaptive = preprocess_lcd_adaptive(lcd_crop)
                         
@@ -171,64 +184,80 @@ def run_app():
                         raw_lcd_adaptive = pytesseract.image_to_string(img_adaptive, config=r'--oem 3 --psm 6')
                         
                         combined_lcd = f"{raw_lcd_clahe}\n{raw_lcd_adaptive}"
-                        metrics = extract_lcd_metrics(combined_lcd)
+                        detailed_rows, summary_dict = extract_lcd_metrics_detailed(combined_lcd)
                         
-                        if metrics:
-                            formatted_metrics = " | ".join([f"{k} = {v}" for k, v in metrics.items()])
+                        # ตรวจสอบว่าสกัดค่าสำเร็จหรือไม่
+                        has_extracted_data = any(v != "-" for v in summary_dict.values())
+                        
+                        if has_extracted_data:
                             status_text = f"✅ ผ่าน (พบ {pac_type})"
                         else:
-                            formatted_metrics = "สแกนเจอจอ LCD แต่ไม่พบรูปแบบตัวเลข"
                             status_text = f"⚠️ พบป้าย {pac_type} แต่สกัดตัวเลขจอ LCD ไม่สำเร็จ"
 
-                        row_data = {
+                        # แสดงผลตารางเปรียบเทียบในรูปแบบแนวตั้งตามสั่งสำหรับแต่ละรูปภาพ
+                        st.markdown(f"### 📁 ไฟล์: `{uploaded_file.name}` | สถานะ: **{status_text}**")
+                        df_detail = pd.DataFrame(detailed_rows)
+                        st.dataframe(df_detail, width="stretch", hide_index=True)
+                        st.markdown("---")
+
+                        # เก็บข้อมูลสำหรับส่งออก CSV
+                        for row in detailed_rows:
+                            all_detailed_export.append({
+                                "ชื่อไฟล์": uploaded_file.name,
+                                "ประเภทที่พบ": pac_type,
+                                "รายการ (Mode / Operation)": row["รายการ (Mode / Operation)"],
+                                "ค่าในรูปภาพดิบ": row["ค่าในรูปภาพดิบ"],
+                                "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": row["ค่าที่สกัดได้ (ตัด 0 นำหน้า)"]
+                            })
+
+                        row_summary = {
                             "ชื่อไฟล์": uploaded_file.name,
                             "ประเภทที่พบ": pac_type,
                             "สถานะ": status_text,
-                            "สรุปค่าบนหน้าจอ LCD": formatted_metrics,
-                            "ข้อความดิบป้ายส่วนหัว": raw_header_text,
-                            "ข้อความดิบ LCD": raw_lcd_clahe.strip()
                         }
-                        
-                        for k, v in metrics.items():
-                            row_data[k] = v
-
-                        all_extracted_data.append(row_data)
+                        row_summary.update(summary_dict)
+                        all_summary_data.append(row_summary)
                     
                     else:
                         # 🎯 เงื่อนไขข้อ 3: หากไม่ใช่ PAC 1 หรือ PAC 3 ไม่ต้องดึงข้อมูล
-                        all_extracted_data.append({
+                        st.markdown(f"### 📁 ไฟล์: `{uploaded_file.name}` | สถานะ: **❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3 ในกรอบดำ)**")
+                        st.info("ข้ามการดึงข้อมูลบนหน้าจอสีเขียว เนื่องจากไม่ตรงตามเงื่อนไขข้อ 1")
+                        st.markdown("---")
+
+                        all_summary_data.append({
                             "ชื่อไฟล์": uploaded_file.name,
                             "ประเภทที่พบ": "-",
-                            "สถานะ": "❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3 ในกรอบดำ)",
-                            "สรุปค่าบนหน้าจอ LCD": "-",
-                            "ข้อความดิบป้ายส่วนหัว": raw_header_text if raw_header_text else "(อ่านไม่พบข้อความ)",
-                            "ข้อความดิบ LCD": "ข้ามการอ่านข้อมูล (ไม่ตรงตามเงื่อนไขข้อ 1)"
+                            "สถานะ": "❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3 ในกรอบดำ)"
                         })
                         
                 except Exception as e:
                     st.error(f"เกิดข้อผิดพลาดกับไฟล์ {uploaded_file.name}: {str(e)}")
 
-        # --- แสดงตารางผลลัพธ์ ---
-        if all_extracted_data:
-            st.markdown("---")
-            st.subheader("📋 ตารางสรุปผลข้อมูล")
+        # --- ปุ่มดาวน์โหลดไฟล์ CSV ---
+        if all_summary_data or all_detailed_export:
+            st.subheader("📥 ดาวน์โหลดข้อมูลสรุปผล")
+            col_dl1, col_dl2 = st.columns(2)
             
-            df = pd.DataFrame(all_extracted_data)
-            display_cols = ["ชื่อไฟล์", "ประเภทที่พบ", "สถานะ", "สรุปค่าบนหน้าจอ LCD"]
-            st.dataframe(df[display_cols], width="stretch")
-            
-            with st.expander("🔍 คลิกเพื่อดูข้อความดิบที่สแกนได้"):
-                for idx, row in df.iterrows():
-                    st.write(f"📁 **{row['ชื่อไฟล์']}** ({row['สถานะ']})")
-                    st.text(f"ข้อความบนป้ายส่วนหัว: '{row['ข้อความดิบป้ายส่วนหัว']}'")
-                    st.code(row['ข้อความดิบ LCD'])
-                    st.markdown("---")
-            
-            csv_data = df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 ดาวน์โหลดข้อมูลสรุปทั้งหมดเป็น CSV",
-                data=csv_data,
-                file_name="pac_lcd_metrics.csv",
-                mime="text/csv",
-                width="stretch"
-            )
+            if all_detailed_export:
+                df_det_export = pd.DataFrame(all_detailed_export)
+                csv_det = df_det_export.to_csv(index=False).encode('utf-8-sig')
+                with col_dl1:
+                    st.download_button(
+                        label="📥 ดาวน์โหลดตารางเปรียบเทียบ (แนวตั้ง)",
+                        data=csv_det,
+                        file_name="pac_detailed_comparison.csv",
+                        mime="text/csv",
+                        width="stretch"
+                    )
+
+            if all_summary_data:
+                df_sum_export = pd.DataFrame(all_summary_data)
+                csv_sum = df_sum_export.to_csv(index=False).encode('utf-8-sig')
+                with col_dl2:
+                    st.download_button(
+                        label="📥 ดาวน์โหลดตารางสรุปผลรวม (แนวนอน)",
+                        data=csv_sum,
+                        file_name="pac_summary_report.csv",
+                        mime="text/csv",
+                        width="stretch"
+                    )
