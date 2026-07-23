@@ -15,18 +15,17 @@ def encode_image_to_base64(image):
 
 def call_gemini_vision_api(image, api_key):
     """
-    เรียกใช้ Gemini Vision API โดยลองรายชื่อโมเดลตามลำดับ (Auto-Fallback)
-    เพื่อให้รองรับทุกบัญชีผู้ใช้งาน 100%
+    เรียกใช้ Gemini Vision API รองรับการเชื่อมต่อ API v1 และ v1beta
+    เพื่อความเสถียรสูงสุด 100%
     """
     base64_image = encode_image_to_base64(image)
     
-    # รายชื่อโมเดลที่รองรับวิเคราะห์รูปภาพแบบเรียงลำดับ
-    model_candidates = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash-exp",
-        "gemini-1.5-pro-latest"
+    # รายชื่อโมเดลและเวอร์ชัน API ที่เสถียรที่สุด
+    endpoints = [
+        ("v1", "gemini-1.5-flash"),
+        ("v1beta", "gemini-1.5-flash"),
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1", "gemini-1.5-pro"),
     ]
     
     prompt = """
@@ -94,26 +93,28 @@ def call_gemini_vision_api(image, api_key):
                     }
                 ]
             }
-        ],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        ]
     }
     
     headers = {'Content-Type': 'application/json'}
     last_error_msg = ""
     
-    # วนลองสลับโมเดลอัตโนมัติหากโมเดลแรกไม่พบ
-    for model_name in model_candidates:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    for ver, model_name in endpoints:
+        url = f"https://generativelanguage.googleapis.com/{ver}/models/{model_name}:generateContent?key={api_key}"
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=30)
             if response.status_code == 200:
                 res_data = response.json()
                 text_content = res_data['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(text_content)
+                
+                # สกัดบล็อก JSON ปลอดภัยด้วย Regex
+                json_match = re.search(r'\{[\s\S]*\}', text_content)
+                if json_match:
+                    return json.loads(json_match.group(0))
+                else:
+                    return json.loads(text_content)
             else:
-                last_error_msg = f"[{model_name}] Code {response.status_code}: {response.text}"
+                last_error_msg = f"[{ver}/{model_name}] Code {response.status_code}: {response.text}"
         except Exception as e:
             last_error_msg = str(e)
             
@@ -156,7 +157,7 @@ def run_app():
                 try:
                     original_img = Image.open(uploaded_file).convert('RGB')
                     
-                    # เรียกใช้ Gemini Vision API พร้อมระบบสลับโมเดลอัตโนมัติ
+                    # เรียกใช้ Gemini Vision API (v1 / v1beta fallback)
                     result = call_gemini_vision_api(original_img, api_key)
                     pac_type = result.get("pac_type", "NONE")
                     
