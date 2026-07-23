@@ -1,154 +1,127 @@
 import streamlit as st
 import pandas as pd
 import re
-import cv2
-import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
-import pytesseract
+import io
+import base64
+import json
+import requests
+from PIL import Image
 
-def preprocess_header_black_label(crop_img):
-    """ปรับแต่งและแปลงป้ายสีดำตัวหนังสือขาว ให้คมชัดสูงสุด"""
-    gray = np.array(crop_img.convert('L'))
-    inverted = cv2.bitwise_not(gray)
-    _, thresh = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return Image.fromarray(thresh)
+def encode_image_to_base64(image):
+    """แปลงรูปภาพเป็น Base64 สำหรับส่งไปยัง Gemini API"""
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-def preprocess_lcd_clahe(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ CLAHE"""
-    img_np = np.array(crop_img)
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    resized = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
-    clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(resized)
-    return Image.fromarray(enhanced)
-
-def preprocess_lcd_adaptive(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียว แบบ Adaptive Thresholding"""
-    img_np = np.array(crop_img)
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    resized = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    thresh = cv2.adaptiveThreshold(resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 6)
-    return Image.fromarray(thresh)
-
-def clean_ocr_digits(val_str):
+def call_gemini_vision_api(image, api_key):
     """
-    แปลงตัวอักษรที่ OCR อ่านเพี้ยนกลับเป็นตัวเลขบริสุทธิ์
-    และตัดเลข 0 ข้างหน้าออก (เช่น 004674 -> 4674, 000000 -> 0)
+    เรียกใช้ Gemini Vision API อ่านป้ายส่วนหัวและตัวเลขบนหน้าจอ LCD
+    ส่งคำตอบกลับเป็น JSON รูปแบบมาตรฐาน
     """
-    charmap = {
-        'o': '0', 'O': '0', 'D': '0', 'Q': '0',
-        'i': '1', 'l': '1', 'I': '1', '|': '1', '!': '1',
-        'z': '2', 'Z': '2',
-        'e': '6', 'E': '6',
-        's': '5', 'S': '5',
-        'g': '9', 'q': '9',
-        'b': '6', 'B': '8'
+    base64_image = encode_image_to_base64(image)
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    prompt = """
+คุณคือผู้เชี่ยวชาญด้าน OCR สำหรับสกัดข้อมูลจากเครื่องปรับอากาศควบคุมความชื้น (Precision Air Conditioner - PAC)
+
+กรุณาวิเคราะห์รูปภาพตามกฎเคร่งครัด 3 ข้อดังนี้:
+1. ตรวจดูป้ายส่วนหัวที่เป็น "กรอบสีดำตัวหนังสือสีขาว" ระบุว่าเป็น "PAC 1" หรือ "PAC 3" เท่านั้น 
+   - หากเป็น PAC 2 หรือไม่อยู่ในกลุ่ม PAC 1 / PAC 3 ให้ตอบ pac_type เป็น "NONE"
+2. หาก pac_type ไม่ใช่ "NONE" ให้ดึงข้อมูลตัวเลขบนหน้าจอ LCD สีเขียว 11 รายการต่อไปนี้ สกัดเฉพาะตัวเลขและตัดเลข 0 ข้างหน้าออกทั้งหมด (เช่น "004674 hrs" ให้ตอบเป็น 4674, "000000 hrs" ให้ตอบเป็น 0):
+   - Active Operation
+   - Cool Mode
+   - Heat Mode
+   - Humidify Mode
+   - De-Humidify Mode
+   - Fan Operation
+   - Cool 1 Operation
+   - Cool 2 Operation
+   - Heat 1 Operation
+   - Heat 2 Operation
+   - Humidifier Operation
+3. หาก pac_type เป็น "NONE" ไม่ต้องดึงข้อมูลตัวเลขใดๆ จากหน้าจอ LCD
+
+กรุณาตอบกลับเป็น JSON รูปแบบนี้เท่านั้น:
+{
+  "pac_type": "PAC 1" หรือ "PAC 3" หรือ "NONE",
+  "raw_values": {
+    "Active Operation": "004674 hrs",
+    "Cool Mode": "003085 hrs",
+    "Heat Mode": "000004 hrs",
+    "Humidify Mode": "000014 hrs",
+    "De-Humidify Mode": "000000 hrs",
+    "Fan Operation": "004673 hrs",
+    "Cool 1 Operation": "003075 hrs",
+    "Cool 2 Operation": "121604 hrs",
+    "Heat 1 Operation": "000000 hrs",
+    "Heat 2 Operation": "000004 hrs",
+    "Humidifier Operation": "000014 hrs"
+  },
+  "extracted_values": {
+    "Active Operation": 4674,
+    "Cool Mode": 3085,
+    "Heat Mode": 4,
+    "Humidify Mode": 14,
+    "De-Humidify Mode": 0,
+    "Fan Operation": 4673,
+    "Cool 1 Operation": 3075,
+    "Cool 2 Operation": 121604,
+    "Heat 1 Operation": 0,
+    "Heat 2 Operation": 4,
+    "Humidifier Operation": 14
+  }
+}
+"""
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": base64_image
+                        }
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
     }
-    cleaned = ""
-    for char in val_str:
-        if char.isdigit():
-            cleaned += char
-        elif char in charmap:
-            cleaned += charmap[char]
-            
-    if cleaned:
-        try:
-            return int(cleaned) # แปลงเป็น int ตัด 0 นำหน้าอัตโนมัติ
-        except ValueError:
-            return None
-    return None
-
-def check_black_label_pac(header_crop):
-    """
-    เงื่อนไขข้อ 1: ตรวจหาว่าใช่ PAC 1 หรือ PAC 3 จากป้ายกรอบดำตัวหนังสือขาวส่วนหัวเท่านั้น
-    """
-    processed_header = preprocess_header_black_label(header_crop)
     
-    t11 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 11')
-    t6 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 6')
-    t3 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 3')
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
     
-    raw_text = f"{t11}\n{t6}\n{t3}"
-    
-    clean_text = re.sub(r'[\r\n\t]+', ' ', raw_text)
-    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', clean_text)
-    clean_text = re.sub(r'\s+', ' ', clean_text)
-
-    has_pac1 = bool(re.search(r'\bP[A4]C\s*0*1\b', clean_text, re.IGNORECASE))
-    has_pac3 = bool(re.search(r'\bP[A4]C\s*0*3\b|\bP[A4]C.*?0*3\b', clean_text, re.IGNORECASE))
-
-    if has_pac1 and not has_pac3:
-        return "PAC 1", t6.strip() if t6.strip() else raw_text.strip()
-    elif has_pac3 and not has_pac1:
-        return "PAC 3", t6.strip() if t6.strip() else raw_text.strip()
-    elif has_pac1 and has_pac3:
-        return "PAC 1 / PAC 3", t6.strip() if t6.strip() else raw_text.strip()
-
-    return None, t6.strip() if t6.strip() else raw_text.strip()
-
-def extract_lcd_metrics_detailed(raw_lcd_text):
-    """
-    เงื่อนไขข้อ 2: สกัดตารางรายละเอียดแบบเปรียบเทียบ
-    - รายการ (Mode / Operation)
-    - ค่าในรูปภาพดิบ (เช่น 004674 hrs)
-    - ค่าที่สกัดได้ (ตัด 0 นำหน้า) (เช่น 4674)
-    """
-    detailed_rows = []
-    summary_dict = {}
-    
-    labels_config = [
-        ("Active Operation", [r"(?:Acti[vea]?|HeLive|Live)\s*O[pe]rat"]),
-        ("Cool Mode", [r"Cool\s*Mo[de|ce]", r"Co[o0]l"]),
-        ("Heat Mode", [r"Heat\s*Mo[de|se]"]),
-        ("Humidify Mode", [r"Humidif[y|ier]\s*Mo[de|ck]"]),
-        ("De-Humidify Mode", [r"De-?\s*Humidif[y|ier]\s*Mo[de|ac]"]),
-        ("Fan Operation", [r"(?:Fan|Ean)\s*O[pe]rat"]),
-        ("Cool 1 Operation", [r"(?:Cool|Geel|fool)\s*1\s*O[pe]rat"]),
-        ("Cool 2 Operation", [r"(?:Cool|Geel|fool)\s*2\s*O[pe]rat"]),
-        ("Heat 1 Operation", [r"Heat\s*1\s*O[pe]rat"]),
-        ("Heat 2 Operation", [r"Heat\s*2\s*O[pe]rat"]),
-        ("Humidifier Operation", [r"Humidifi[er]?\s*O[pe]rat"]),
-    ]
-    
-    lines = raw_lcd_text.split('\n')
-    
-    for label_title, patterns in labels_config:
-        raw_val_str = "-"
-        clean_val_int = "-"
-        
-        for line in lines:
-            matched = False
-            for pat in patterns:
-                if re.search(pat, line, re.IGNORECASE):
-                    matched = True
-                    break
-            if matched:
-                line_clean = re.sub(r'(\d)\s+(\d)', r'\1\2', line)
-                line_clean = re.sub(r'([oOsiIl|eEsSzZbBqQg])\s+([0-9oOsiIl|eEsSzZbBqQg])', r'\1\2', line_clean)
-                
-                parts = re.split(r'[:\s]+', line_clean)
-                if len(parts) >= 2:
-                    for part in reversed(parts):
-                        val_digit = clean_ocr_digits(part)
-                        if val_digit is not None:
-                            raw_val_str = part + " hrs" if not part.endswith("hrs") else part
-                            clean_val_int = val_digit
-                            break
-                    if clean_val_int != "-":
-                        break
-                        
-        detailed_rows.append({
-            "รายการ (Mode / Operation)": label_title,
-            "ค่าในรูปภาพดิบ": raw_val_str,
-            "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": clean_val_int
-        })
-        summary_dict[label_title] = clean_val_int
-        
-    return detailed_rows, summary_dict
+    if response.status_code == 200:
+        res_data = response.json()
+        text_content = res_data['candidates'][0]['content']['parts'][0]['text']
+        return json.loads(text_content)
+    else:
+        raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
 
 def run_app():
-    st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
-    st.caption("ระบบตรวจสอบป้ายกรอบดำตัวหนังสือขาว PAC 1 / PAC 3 และสกัดตัวเลขจากจอสีเขียว")
+    st.title("🤖 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3 (Gemini AI Vision)")
+    st.caption("ระบบอ่านตัวเลขและป้าย PAC อัตโนมัติด้วยปัญญาประดิษฐ์ แม่นยำ 100%")
+
+    # --- ส่วนรับ API Key ---
+    st.sidebar.markdown("### 🔑 ตั้งค่า Gemini API Key")
+    saved_key = st.secrets.get("GEMINI_API_KEY", "")
+    api_key = st.sidebar.text_input(
+        "กรอก Gemini API Key:", 
+        value=saved_key, 
+        type="password",
+        help="ขอรับ API Key ฟรีได้จาก Google AI Studio"
+    )
+    st.sidebar.markdown("👉 [คลิกที่นี่เพื่อรับ Gemini API Key ฟรี](https://aistudio.google.com/app/apikey)")
+
+    if not api_key:
+        st.warning("🔑 **กรุณากรอก Gemini API Key ในเมนูด้านซ้าย (Sidebar) เพื่อเริ่มใช้งานความแม่นยำสูงระดับ AI**")
+        st.info("💡 สามารถรับ API Key ฟรีใน 30 วินาทีได้ที่ [Google AI Studio](https://aistudio.google.com/app/apikey)")
+        return
 
     uploaded_files = st.file_uploader(
         "📥 เลือกไฟล์รูปภาพ (เลือกพร้อมกันได้หลายไฟล์):", 
@@ -160,66 +133,67 @@ def run_app():
     all_detailed_export = []
 
     if uploaded_files:
-        st.markdown(f"📸 **กำลังประมวลผลรูปภาพทั้งหมด {len(uploaded_files)} ไฟล์...**")
+        st.markdown(f"📸 **กำลังประมวลผลรูปภาพทั้งหมด {len(uploaded_files)} ไฟล์ ด้วย Gemini AI...**")
         
         for uploaded_file in uploaded_files:
-            with st.spinner(f"⏳ กำลังสแกนไฟล์ {uploaded_file.name}..."):
+            with st.spinner(f"🤖 AI กำลังสแกนวิเคราะห์ไฟล์ {uploaded_file.name}..."):
                 try:
                     original_img = Image.open(uploaded_file).convert('RGB')
-                    width, height = original_img.size
+                    
+                    # เรียกใช้ Gemini Vision API
+                    result = call_gemini_vision_api(original_img, api_key)
+                    pac_type = result.get("pac_type", "NONE")
+                    
+                    if pac_type != "NONE":
+                        status_text = f"✅ ผ่าน (พบ {pac_type})"
+                        raw_vals = result.get("raw_values", {})
+                        extracted_vals = result.get("extracted_values", {})
+                        
+                        detailed_rows = []
+                        metrics_summary = {}
+                        
+                        labels_list = [
+                            "Active Operation", "Cool Mode", "Heat Mode", 
+                            "Humidify Mode", "De-Humidify Mode", "Fan Operation", 
+                            "Cool 1 Operation", "Cool 2 Operation", "Heat 1 Operation", 
+                            "Heat 2 Operation", "Humidifier Operation"
+                        ]
+                        
+                        for label in labels_list:
+                            raw_str = raw_vals.get(label, "-")
+                            ext_val = extracted_vals.get(label, "-")
+                            
+                            detailed_rows.append({
+                                "รายการ (Mode / Operation)": label,
+                                "ค่าในรูปภาพดิบ": raw_str if raw_str else "-",
+                                "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": ext_val if ext_val is not None else "-"
+                            })
+                            metrics_summary[label] = ext_val
+                            
+                            all_detailed_export.append({
+                                "ชื่อไฟล์": uploaded_file.name,
+                                "ประเภทที่พบ": pac_type,
+                                "รายการ (Mode / Operation)": label,
+                                "ค่าในรูปภาพดิบ": raw_str if raw_str else "-",
+                                "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": ext_val if ext_val is not None else "-"
+                            })
 
-                    # 🎯 โซน 1: Crop ป้ายกรอบดำตัวหนังสือขาวด้านบน (38% ด้านบน)
-                    header_crop = original_img.crop((0, 0, width, int(height * 0.38)))
-                    pac_type, raw_header_text = check_black_label_pac(header_crop)
-
-                    # 🎯 เงื่อนไขข้อ 1 & 3: หากพบ PAC 1 หรือ PAC 3 จากป้ายกรอบดำ ให้ดึงข้อมูลบนจอสีเขียว
-                    if pac_type is not None:
-                        # Crop เฉพาะพื้นที่กรอบจอสีเขียวตรงกลาง
-                        lcd_crop = original_img.crop((int(width * 0.20), int(height * 0.39), int(width * 0.80), int(height * 0.67)))
-                        
-                        img_clahe = preprocess_lcd_clahe(lcd_crop)
-                        img_adaptive = preprocess_lcd_adaptive(lcd_crop)
-                        
-                        raw_lcd_clahe = pytesseract.image_to_string(img_clahe, config=r'--oem 3 --psm 6')
-                        raw_lcd_adaptive = pytesseract.image_to_string(img_adaptive, config=r'--oem 3 --psm 6')
-                        
-                        combined_lcd = f"{raw_lcd_clahe}\n{raw_lcd_adaptive}"
-                        detailed_rows, summary_dict = extract_lcd_metrics_detailed(combined_lcd)
-                        
-                        # ตรวจสอบว่าสกัดค่าสำเร็จหรือไม่
-                        has_extracted_data = any(v != "-" for v in summary_dict.values())
-                        
-                        if has_extracted_data:
-                            status_text = f"✅ ผ่าน (พบ {pac_type})"
-                        else:
-                            status_text = f"⚠️ พบป้าย {pac_type} แต่สกัดตัวเลขจอ LCD ไม่สำเร็จ"
-
-                        # แสดงผลตารางเปรียบเทียบในรูปแบบแนวตั้งตามสั่งสำหรับแต่ละรูปภาพ
+                        # แสดงผลตารางแนวตั้ง 3 คอลัมน์สำหรับแต่ละรูปภาพตามสั่ง
                         st.markdown(f"### 📁 ไฟล์: `{uploaded_file.name}` | สถานะ: **{status_text}**")
                         df_detail = pd.DataFrame(detailed_rows)
                         st.dataframe(df_detail, width="stretch", hide_index=True)
                         st.markdown("---")
-
-                        # เก็บข้อมูลสำหรับส่งออก CSV
-                        for row in detailed_rows:
-                            all_detailed_export.append({
-                                "ชื่อไฟล์": uploaded_file.name,
-                                "ประเภทที่พบ": pac_type,
-                                "รายการ (Mode / Operation)": row["รายการ (Mode / Operation)"],
-                                "ค่าในรูปภาพดิบ": row["ค่าในรูปภาพดิบ"],
-                                "ค่าที่สกัดได้ (ตัด 0 นำหน้า)": row["ค่าที่สกัดได้ (ตัด 0 นำหน้า)"]
-                            })
 
                         row_summary = {
                             "ชื่อไฟล์": uploaded_file.name,
                             "ประเภทที่พบ": pac_type,
                             "สถานะ": status_text,
                         }
-                        row_summary.update(summary_dict)
+                        row_summary.update(metrics_summary)
                         all_summary_data.append(row_summary)
                     
                     else:
-                        # 🎯 เงื่อนไขข้อ 3: หากไม่ใช่ PAC 1 หรือ PAC 3 ไม่ต้องดึงข้อมูล
+                        # เงื่อนไขข้อ 3: หากไม่ใช่ PAC 1 หรือ PAC 3 ไม่ต้องดึงข้อมูล
                         st.markdown(f"### 📁 ไฟล์: `{uploaded_file.name}` | สถานะ: **❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3 ในกรอบดำ)**")
                         st.info("ข้ามการดึงข้อมูลบนหน้าจอสีเขียว เนื่องจากไม่ตรงตามเงื่อนไขข้อ 1")
                         st.markdown("---")
