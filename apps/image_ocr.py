@@ -7,47 +7,56 @@ from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 
 def preprocess_header_black_label(crop_img):
-    """ปรับแต่งและกลับสีป้ายสีดำตัวหนังสือขาว (Black label with white text)"""
-    gray = crop_img.convert('L')
-    inverted = ImageOps.invert(gray)
-    enhancer = ImageEnhance.Contrast(inverted)
-    return enhancer.enhance(2.5)
+    """ปรับแต่งและแปลงป้ายสีดำตัวหนังสือขาว ให้เป็นตัวอักษรสีดำบนพื้นหลังขาวคมชัดสูงสุด"""
+    gray = np.array(crop_img.convert('L'))
+    # กลับสี (Invert)
+    inverted = cv2.bitwise_not(gray)
+    # ใช้ Otsu Thresholding เพื่อตัดสัญญาณรบกวนและทำให้ตัวอักษรดำสนิท
+    _, thresh = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return Image.fromarray(thresh)
 
-def preprocess_lcd_fast(crop_img):
-    """ปรับแต่งภาพหน้าจอ LCD สีเขียว"""
+def preprocess_lcd_advanced(crop_img):
+    """ปรับแต่งหน้าจอ LCD สีเขียว (Liebert Dot-matrix Display) ให้ OCR อ่านง่ายขึ้น"""
     img_np = np.array(crop_img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     
-    # ขยายรูป 1.5 เท่า
-    resized = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
+    # ขยายขนาดภาพ 2 เท่า เพื่อให้ตัวอักษรลายจุด (Dot-matrix) ต่อกันชัดเจนขึ้น
+    resized = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     
-    # เร่ง Contrast
+    # เร่ง Contrast คมชัด
     enhanced = cv2.equalizeHist(resized)
-    return enhanced
+    
+    # ทวิภาค (Thresholding) แยกตัวอักษรออกจากพื้นหลังสีเขียว
+    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return thresh
 
 def check_black_label_pac(header_crop):
     """
     เงื่อนไขข้อ 1: ตรวจหาว่าใช่ PAC 1 หรือ PAC 3 จากป้ายกรอบดำตัวหนังสือขาวส่วนหัวเท่านั้น
     """
-    inverted_header = preprocess_header_black_label(header_crop)
-    text = pytesseract.image_to_string(inverted_header, config=r'--oem 3 --psm 6')
+    processed_header = preprocess_header_black_label(header_crop)
+    
+    # ลองสแกนด้วย PSM 11 (Sparse text) และ PSM 6 (Block text) เพื่อเพิ่มความแม่นยำ
+    text11 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 11')
+    text6 = pytesseract.image_to_string(processed_header, config=r'--oem 3 --psm 6')
+    combined_text = f"{text11}\n{text6}"
 
     # ค้นหา PAC 1 หรือ PAC 3
-    has_pac1 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*[1lI|]\b', text, re.IGNORECASE))
-    has_pac3 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*3\b', text, re.IGNORECASE))
+    has_pac1 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*[1lI|]\b', combined_text, re.IGNORECASE))
+    has_pac3 = bool(re.search(r'\bP[A4]C\s*[-_.]?\s*3\b', combined_text, re.IGNORECASE))
 
     if has_pac1 and not has_pac3:
-        return "PAC 1", text.strip()
+        return "PAC 1", combined_text.strip()
     elif has_pac3 and not has_pac1:
-        return "PAC 3", text.strip()
+        return "PAC 3", combined_text.strip()
     elif has_pac1 and has_pac3:
-        return "PAC 1 / PAC 3", text.strip()
+        return "PAC 1 / PAC 3", combined_text.strip()
 
-    return None, text.strip()
+    return None, combined_text.strip()
 
 def extract_lcd_metrics(raw_lcd_text):
     """
-    เงื่อนไขข้อ 2: สกัดเฉพาะตัวเลขจากจอสีเขียว และตัดเลข 0 ข้างหน้าออก (เช่น 000010 -> 10)
+    เงื่อนไขข้อ 2: สกัดเฉพาะตัวเลขจากจอสีเขียว และตัดเลข 0 ข้างหน้าออก (เช่น 004674 -> 4674, 000000 -> 0)
     """
     metrics = {}
     
@@ -74,7 +83,7 @@ def extract_lcd_metrics(raw_lcd_text):
         for line in lines:
             if re.search(pattern, line, re.IGNORECASE):
                 # ค้นหาชุดตัวเลขหลังคำอธิบาย
-                # 0*(\d+) จะช่วยละทิ้งเลข 0 ที่นำหน้า เช่น 000010 -> ได้ 10
+                # 0*(\d+) จะช่วยละทิ้งเลข 0 ที่นำหน้า เช่น 004674 -> ได้ 4674, 000000 -> ได้ 0
                 num_match = re.search(r'[:\s]+0*(\d+)\s*(?:hrs)?', line, re.IGNORECASE)
                 if num_match:
                     val_str = num_match.group(1)
@@ -105,15 +114,15 @@ def run_app():
                     original_img = Image.open(uploaded_file).convert('RGB')
                     width, height = original_img.size
 
-                    # 🎯 โซน 1: Crop ป้ายกรอบดำตัวหนังสือขาวด้านบน (35% ด้านบน)
-                    header_crop = original_img.crop((0, 0, width, int(height * 0.35)))
+                    # 🎯 โซน 1: Crop ป้ายกรอบดำตัวหนังสือขาวด้านบน (40% ด้านบน)
+                    header_crop = original_img.crop((0, 0, width, int(height * 0.40)))
                     pac_type, raw_header_text = check_black_label_pac(header_crop)
 
                     # 🎯 เงื่อนไขข้อ 1 & 3: หากพบ PAC 1 หรือ PAC 3 จากป้ายกรอบดำ ให้ดึงข้อมูลบนจอสีเขียว
                     if pac_type is not None:
                         # Crop หน้าจอ LCD สีเขียว
                         lcd_crop = original_img.crop((int(width * 0.15), int(height * 0.35), int(width * 0.85), int(height * 0.75)))
-                        processed_lcd = preprocess_lcd_fast(lcd_crop)
+                        processed_lcd = preprocess_lcd_advanced(lcd_crop)
                         
                         # สแกนอ่านข้อความ LCD
                         lcd_raw_text = pytesseract.image_to_string(processed_lcd, config=r'--oem 3 --psm 6')
