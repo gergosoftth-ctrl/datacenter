@@ -31,9 +31,7 @@ def run_app():
                 original_img = Image.open(uploaded_file).convert('RGB')
                 width, height = original_img.size
 
-                # -------------------------------------------------------------
                 # 🎯 โซนที่ 1: Crop ป้าย PAC ด้านบน (พื้นที่ 0% - 35% ของความสูงภาพ)
-                # -------------------------------------------------------------
                 header_crop = original_img.crop((0, 0, width, int(height * 0.35)))
                 header_results = reader.readtext(np.array(header_crop), detail=0)
                 header_text = " ".join(header_results)
@@ -48,9 +46,7 @@ def run_app():
                 elif has_pac3:
                     pac_found_type = "PAC 3"
 
-                # -------------------------------------------------------------
                 # 🎯 โซนที่ 2: Crop หน้าจอ LCD สีเขียวตรงกลาง (พื้นที่ 35% - 70% ของความสูง)
-                # -------------------------------------------------------------
                 if has_pac1 or has_pac3:
                     lcd_crop = original_img.crop((int(width * 0.15), int(height * 0.35), int(width * 0.85), int(height * 0.70)))
                     
@@ -93,7 +89,6 @@ def run_app():
             st.subheader("📋 ตารางสรุปผลข้อมูล")
             
             df = pd.DataFrame(all_extracted_data)
-            # แสดงเฉพาะคอลัมน์หลักในตาราง
             st.dataframe(df[["ชื่อไฟล์", "ประเภทที่พบ", "สถานะ", "ตัวเลขบนจอ LCD"]], width="stretch")
             
             with st.expander("🔍 คลิกเพื่อดูรายละเอียดข้อความที่ AI อ่านได้แยกตามโซน"):
