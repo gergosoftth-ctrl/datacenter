@@ -126,7 +126,7 @@ else:
             image_ocr.run_app()
         except ModuleNotFoundError as e:
             st.error(f"❌ ระบบหาไฟล์ไม่พบ: {str(e)}")
-            st.info("💡 กรุณาตรวจสอบว่าใน GitHub มีไฟล์ `apps/image_ocr.py` และ `apps/__init__.py` เรียบร้อยแล้ว"))
+            st.info("💡 กรุณาตรวจสอบว่าใน GitHub มีไฟล์ `apps/image_ocr.py` และ `apps/__init__.py` เรียบร้อยแล้ว")
             
     elif st.session_state.selected_app == "supabase_db":
         st.title("🗂️ ระบบจัดการข้อมูลหลังบ้าน (Supabase)")
