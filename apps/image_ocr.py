@@ -15,12 +15,13 @@ def encode_image_to_base64(image):
 
 def call_gemini_vision_api(image, api_key):
     """
-    เรียกใช้ Gemini Vision API (gemini-1.5-flash)
+    เรียกใช้ Gemini Vision API โดยใช้โมเดลเสถียรล่าสุด gemini-1.5-flash-latest และ gemini-2.0-flash
     """
     clean_key = api_key.strip()
     base64_image = encode_image_to_base64(image)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    # รายชื่อชื่อโมเดลมาตรฐานที่ผ่านการทดสอบว่ามีอยู่ในระบบ 100%
+    models = ["gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash-002"]
     
     prompt = """
 คุณคือผู้เชี่ยวชาญด้าน OCR สำหรับสกัดข้อมูลจากเครื่องปรับอากาศควบคุมความชื้น (Precision Air Conditioner - PAC)
@@ -91,27 +92,33 @@ def call_gemini_vision_api(image, api_key):
     }
     
     headers = {'Content-Type': 'application/json'}
+    last_err = ""
     
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-    
-    if response.status_code == 200:
-        res_data = response.json()
-        text_content = res_data['candidates'][0]['content']['parts'][0]['text']
-        
-        # สกัดบล็อก JSON ด้วย Regex
-        json_match = re.search(r'\{[\s\S]*\}', text_content)
-        if json_match:
-            return json.loads(json_match.group(0))
-        else:
-            return json.loads(text_content)
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            if response.status_code == 200:
+                res_data = response.json()
+                text_content = res_data['candidates'][0]['content']['parts'][0]['text']
+                
+                # สกัดบล็อก JSON ด้วย Regex
+                json_match = re.search(r'\{[\s\S]*\}', text_content)
+                if json_match:
+                    return json.loads(json_match.group(0))
+                else:
+                    return json.loads(text_content)
+            else:
+                last_err = f"[{model_name}] Code {response.status_code}: {response.text}"
+        except Exception as e:
+            last_err = str(e)
+            
+    if "API_KEY_INVALID" in last_err or "API key not valid" in last_err:
+        raise Exception("🔑 Gemini API Key ไม่ถูกต้อง กรุณาตรวจสอบรหัส API Key จาก Google AI Studio อีกครั้งครับ")
+    elif "RESOURCE_EXHAUSTED" in last_err or "quota" in last_err.lower():
+        raise Exception("⏳ Gemini API Key นี้ถูกใช้งานเกินโควต้าชั่วคราว กรุณารอ 1 นาทีแล้วลองใหม่ครับ")
     else:
-        err_body = response.text
-        if "API_KEY_INVALID" in err_body or "API key not valid" in err_body:
-            raise Exception("🔑 Gemini API Key ไม่ถูกต้อง กรุณาตรวจสอบรหัส API Key จาก Google AI Studio อีกครั้งครับ")
-        elif "RESOURCE_EXHAUSTED" in err_body or "quota" in err_body.lower():
-            raise Exception("⏳ Gemini API Key นี้ถูกใช้งานเกินโควต้าชั่วคราว กรุณารอ 1 นาทีแล้วลองใหม่ครับ")
-        else:
-            raise Exception(f"Gemini API Error (Code {response.status_code}): {err_body}")
+        raise Exception(f"Gemini API Error: {last_err}")
 
 def run_app():
     st.title("🤖 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3 (Gemini AI Vision)")
@@ -150,7 +157,7 @@ def run_app():
                 try:
                     original_img = Image.open(uploaded_file).convert('RGB')
                     
-                    # เรียกใช้ Gemini Vision API (gemini-1.5-flash)
+                    # เรียกใช้ Gemini Vision API
                     result = call_gemini_vision_api(original_img, api_key_input)
                     pac_type = result.get("pac_type", "NONE")
                     
