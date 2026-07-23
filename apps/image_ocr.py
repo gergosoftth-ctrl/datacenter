@@ -1,80 +1,98 @@
 import streamlit as st
 import pandas as pd
 import re
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import pytesseract
 
-def run_app():
-    st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ (Image OCR)")
-    st.write("เวอร์ชันทดสอบ: อัปโหลดได้หลายรูปพร้อมกัน ดึงตัวเลขทั้งหมดเฉพาะรูปที่มีคำว่า PAC1 หรือ PAC3")
+def preprocess_image(image):
+    """ฟังก์ชันปรับแต่งรูปภาพก่อนส่งให้ OCR อ่าน เพื่อเพิ่มความแม่นยำสูงขึ้น"""
+    # 1. แปลงรูปเป็นสีขาว-ดำ (Grayscale)
+    img = image.convert('L')
+    
+    # 2. เพิ่มความคมชัด (Contrast) ให้ตัวอักษรเข้มขึ้น
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(2.0)
+    
+    # 3. ขยายขนาดรูปเป็น 2 เท่า ให้ตัวอักษรใหญ่และอ่านง่ายขึ้น
+    width, height = img.size
+    img = img.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
+    
+    return img
 
-    # 1. ปรับช่องอัปโหลดให้รองรับหลายรูปพร้อมกันด้วย accept_multiple_files=True
+def run_app():
+    st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ (Image OCR - Enhanced)")
+    st.write("เวอร์ชันเพิ่มความแม่นยำ: รองรับ PAC1, PAC3, PAC5 (รวมถึงแบบมีเว้นวรรค เช่น PAC 1)")
+
     uploaded_files = st.file_uploader(
         "📥 เลือกไฟล์รูปภาพ (สามารถเลือกพร้อมกันได้หลายไฟล์):", 
         type=["png", "jpg", "jpeg"],
         accept_multiple_files=True
     )
 
-    # เตรียมลิสต์ไว้เก็บข้อมูลของทุกรูปเพื่อแปลงเป็น CSV
     all_extracted_data = []
 
     if uploaded_files:
         st.markdown(f"📸 **กำลังประมวลผลรูปภาพทั้งหมด {len(uploaded_files)} ไฟล์...**")
         
-        # วนลูปอ่านทีละรูปที่ยูสเซอร์อัปโหลดเข้ามา
         for uploaded_file in uploaded_files:
             try:
-                # เปิดรูปภาพด้วย Pillow
-                img = Image.open(uploaded_file)
+                # เปิดรูปภาพต้นฉบับ
+                original_img = Image.open(uploaded_file)
                 
-                # สั่งให้ Pytesseract อ่านข้อความทั้งหมดในรูปออกมาเป็น String
-                # (รองรับทั้งภาษาอังกฤษและตัวเลขเป็นหลัก)
-                raw_text = pytesseract.image_to_string(img)
+                # 1. ปรับแต่งรูปภาพให้คมชัดก่อนอ่าน
+                processed_img = preprocess_image(original_img)
                 
-                # ตรวจเงื่อนไข: เช็คว่าในข้อความมีคำว่า PAC1 หรือ PAC5 หรือไม่ (ไม่สนพิมพ์เล็กพิมพ์ใหญ่)
-                raw_text_lower = raw_text.lower()
-                if "pac1" in raw_text_lower or "pac5" in raw_text_lower:
-                    
-                    # 🎯 ดึงตัวเลขทั้งหมดที่มีอยู่ในข้อความ (หาตัวเลขแบบต่อเนื่อง เช่น 123, 45.6)
+                # 2. สั่งอ่านข้อความด้วย Tesseract พร้อมตั้งค่า psm 6 (อ่านข้อความแบบอิสระ)
+                custom_config = r'--oem 3 --psm 6'
+                raw_text = pytesseract.image_to_string(processed_img, config=custom_config)
+                
+                # ถ้ารายงานรอบแรกไม่เจอ ลองอ่านด้วยโหมด psm 11 แบบสำรอง
+                if not raw_text.strip():
+                    raw_text = pytesseract.image_to_string(processed_img, config=r'--oem 3 --psm 11')
+
+                # 3. ใช้ Regex เช็คเงื่อนไข: ดักจับคำว่า PAC ตามด้วยเลข 1, 3 หรือ 5 (ยอมให้มีช่องว่างหรือขีดได้)
+                # เช่น จับคำว่า: pac1, pac 1, pac-1, pac3, pac 3, pac5
+                pac_pattern = r'PAC\s*[-_]?\s*[135]'
+                has_pac = bool(re.search(pac_pattern, raw_text, re.IGNORECASE))
+
+                if has_pac:
+                    # ดึงตัวเลขทั้งหมดที่มีอยู่ในภาพออกมา
                     numbers_found = re.findall(r'\d+(?:\.\d+)?', raw_text)
+                    numbers_combined = ", ".join(numbers_found) if numbers_found else "พบคำตามเงื่อนไข แต่ไม่พบตัวเลขอื่น"
                     
-                    # ถอดตัวเลขมารวมกันเป็นข้อความชุดเดียวคั่นด้วยเครื่องหมายจุลภาค (,) เพื่อให้ดูง่ายก่อน
-                    numbers_combined = ", ".join(numbers_found) if numbers_found else "ไม่พบตัวเลขในภาพ"
-                    
-                    # เก็บผลลัพธ์ลงในลิสต์ข้อมูล
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
-                        "สถานะเงื่อนไข": "ผ่าน (พบ PAC1/PAC3)",
+                        "สถานะเงื่อนไข": "✅ ผ่าน (พบ PAC1/PAC3/PAC5)",
                         "ตัวเลขทั้งหมดที่พบ": numbers_combined,
                         "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' ')
                     })
                 else:
-                    # ถ้ารูปนั้นไม่มีคำที่กำหนด ก็ข้ามไป หรือจะบันทึกไว้ว่าไม่ผ่านเงื่อนไขก็ได้ครับ
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
-                        "สถานะเงื่อนไข": "❌ ไม่ผ่าน (ไม่พบคำที่กำหนด)",
+                        "สถานะเงื่อนไข": "❌ ไม่ผ่าน (สแกนไม่เจอ PAC1/3/5)",
                         "ตัวเลขทั้งหมดที่พบ": "-",
-                        "ข้อความดิบที่สแกนได้": "ข้ามการดึงตัวเลข"
+                        "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' ') if raw_text.strip() else "อ่านข้อความไม่ได้"
                     })
                     
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาดกับไฟล์ {uploaded_file.name}: {str(e)}")
 
-        # --- ส่วนแสดงตารางผลลัพธ์และการดาวน์โหลด CSV ---
+        # --- ส่วนแสดงผลตารางผลลัพธ์ ---
         if all_extracted_data:
             st.markdown("---")
             st.subheader("📋 ตารางสรุปผลข้อมูล")
             
-            # แปลงข้อมูลเป็น DataFrame ของ Pandas เพื่อทำตารางและ CSV
             df = pd.DataFrame(all_extracted_data)
-            
-            # โชว์ตารางบนหน้าจอ Dashboard
             st.dataframe(df, use_container_width=True)
             
-            # แปลงตารางเป็นไฟล์ CSV รูปแบบ UTF-8 รองรับภาษาไทย
-            csv_data = df.to_csv(index=False).encode('utf-8-sig')
+            # โชว์ข้อความดิบให้เราเช็คดูได้ด้วยว่า OCR อ่านอะไรออกมาได้บ้าง
+            with st.expander("🔍 ดูข้อความดิบทั้งหมดที่ OCR สแกนได้ (สำหรับตรวจสอบ Debug)"):
+                for idx, row in df.iterrows():
+                    st.write(f"**ไฟล์:** {row['ชื่อไฟล์']}")
+                    st.code(row['ข้อความดิบที่สแกนได้'])
+                    st.markdown("---")
             
-            # ปุ่มเสกไฟล์ดาวน์โหลด CSV ลงเครื่องคอมพิวเตอร์
+            csv_data = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 ดาวน์โหลดข้อมูลทั้งหมดเป็น CSV",
                 data=csv_data,
@@ -82,4 +100,3 @@ def run_app():
                 mime="text/csv",
                 use_container_width=True
             )
-            st.success("✨ ประมวลผลและเตรียมไฟล์ CSV สำเร็จเรียบร้อย!")
