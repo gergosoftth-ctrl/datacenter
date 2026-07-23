@@ -4,18 +4,43 @@ import re
 from PIL import Image, ImageEnhance
 import pytesseract
 
-def process_image_for_lcd(img):
-    """ปรับแต่งรูปภาพเพื่อให้อ่านทั้งป้าย PAC และหน้าจอ LCD ได้แม่นยำที่สุด"""
-    gray = img.convert('L')
+def get_pac_header_text(img):
+    """ฟังก์ชันตัดเฉพาะส่วนบนของรูปภาพ (เพื่ออ่านป้าย PAC ใหญ่สีดำ-ขาว)"""
+    width, height = img.size
+    # ตัดรูปเอาเฉพาะโซนบน 35% แรกของภาพ
+    header_crop = img.crop((0, 0, width, int(height * 0.35)))
+    
+    # เพิ่ม Contrast ให้ป้ายสีดำ-ขาวเด่นชัดขึ้น
+    gray = header_crop.convert('L')
+    enhancer = ImageEnhance.Contrast(gray)
+    enhanced = enhancer.enhance(3.0)
+    
+    text = pytesseract.image_to_string(enhanced, config=r'--oem 3 --psm 6')
+    return text
+
+def get_lcd_numbers(img):
+    """ฟังก์ชันตัดเฉพาะส่วนจอ LCD สีเขียวตรงกลาง เพื่อดึงตัวเลขในจอเท่านั้น"""
+    width, height = img.size
+    # ตัดรูปเอาเฉพาะพื้นที่ตรงกลางช่วง 30% - 70% ของภาพ (ตำแหน่งของจอ LCD)
+    lcd_crop = img.crop((int(width * 0.15), int(height * 0.30), int(width * 0.85), int(height * 0.70)))
+    
+    # เร่งความสว่างและ Contrast ของหน้าจอดิจิทัล
+    gray = lcd_crop.convert('L')
     enhancer = ImageEnhance.Contrast(gray)
     enhanced = enhancer.enhance(2.5)
-    brightness = ImageEnhance.Brightness(enhanced)
-    bright_img = brightness.enhance(1.2)
-    return bright_img
+    
+    # อ่านข้อความเฉพาะในจอ LCD
+    lcd_text = pytesseract.image_to_string(enhanced, config=r'--oem 3 --psm 6')
+    
+    # 🎯 สกัดเฉพาะตัวเลขที่มีความยาวตั้งแต่ 2 หลักขึ้นไปในจอ LCD (เช่น 004674, 003085, 121604)
+    # ไม่เอาตัวเลขอุณหภูมิหรือตัวเลขเล็กๆ ข้างนอก
+    lcd_numbers = re.findall(r'\b\d{2,8}\b', lcd_text)
+    
+    return lcd_text, lcd_numbers
 
 def run_app():
     st.title("🔍 ระบบอ่านตัวเลขจากรูปภาพ PAC 1 / PAC 3")
-    st.write("เวอร์ชันปรับปรุงยืดหยุ่น: ดักจับเคส OCR อ่านเพี้ยน (เช่น AC l, PACI, PA C 1)")
+    st.write("เวอร์ชันโฟกัสโซน: อ่านป้าย PAC จากกล่องสีดำด้านบน และสกัดเฉพาะตัวเลขในจอ LCD สีเขียว")
 
     uploaded_files = st.file_uploader(
         "📥 เลือกไฟล์รูปภาพ (เลือกพร้อมกันได้หลายไฟล์):", 
@@ -31,22 +56,19 @@ def run_app():
         for uploaded_file in uploaded_files:
             try:
                 original_img = Image.open(uploaded_file)
-                processed_img = process_image_for_lcd(original_img)
                 
-                # อ่านข้อความด้วยโหมดต่างๆ แล้วนำมารวมกัน
-                raw_text_1 = pytesseract.image_to_string(processed_img, config=r'--oem 3 --psm 11')
-                raw_text_2 = pytesseract.image_to_string(original_img, config=r'--oem 3 --psm 3')
-                raw_text = raw_text_1 + "\n" + raw_text_2
-
-                # 🎯 Regex ยืดหยุ่นพิเศษ:
-                # ดักจับ: PAC 1, PAC1, AC 1, AC l, PACI, PAC 3, AC 3
-                # (P มีหรือไม่มีก็ได้ / 1 อาจกลายเป็น 1, l, I)
+                # 1. อ่านป้าย PAC จากโซนบน (กล่องดำใหญ่)
+                header_text = get_pac_header_text(original_img)
                 
-                pattern_pac1 = r'P?AC\s*[-_]?\s*[1lI]\b'
-                pattern_pac3 = r'P?AC\s*[-_]?\s*3\b'
-
-                has_pac1 = bool(re.search(pattern_pac1, raw_text, re.IGNORECASE))
-                has_pac3 = bool(re.search(pattern_pac3, raw_text, re.IGNORECASE))
+                # ตรวจหา PAC 1 หรือ PAC 3
+                has_pac1 = bool(re.search(r'P?AC\s*[-_]?\s*[1lI]\b', header_text, re.IGNORECASE))
+                has_pac3 = bool(re.search(r'P?AC\s*[-_]?\s*3\b', header_text, re.IGNORECASE))
+                
+                # ถ้าโซนบนสแกนไม่เจอ ลองสแกนทั้งรูปสำรองไว้
+                if not has_pac1 and not has_pac3:
+                    full_text = pytesseract.image_to_string(original_img, config=r'--oem 3 --psm 11')
+                    has_pac1 = bool(re.search(r'P?AC\s*[-_]?\s*[1lI]\b', full_text, re.IGNORECASE))
+                    has_pac3 = bool(re.search(r'P?AC\s*[-_]?\s*3\b', full_text, re.IGNORECASE))
 
                 pac_found_type = "-"
                 if has_pac1:
@@ -54,25 +76,26 @@ def run_app():
                 elif has_pac3:
                     pac_found_type = "PAC 3"
 
+                # 2. ถ้ารูปนี้ตรงเงื่อนไข PAC 1 หรือ PAC 3 ให้ไปตัดโฟกัสเจาะอ่านเฉพาะจอ LCD สีเขียว
                 if has_pac1 or has_pac3:
-                    # ดึงตัวเลขทั้งหมดที่เจอในภาพ
-                    numbers_found = re.findall(r'\b\d+(?:\.\d+)?\b', raw_text)
-                    numbers_combined = ", ".join(numbers_found) if numbers_found else "ไม่พบตัวเลข"
+                    lcd_raw_text, lcd_numbers = get_lcd_numbers(original_img)
+                    
+                    numbers_combined = ", ".join(lcd_numbers) if lcd_numbers else "อ่านตัวเลขในจอ LCD ไม่ชัด"
                     
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
                         "ประเภทที่พบ": pac_found_type,
                         "สถานะ": "✅ ผ่าน (พบ " + pac_found_type + ")",
-                        "ตัวเลขทั้งหมดในภาพ": numbers_combined,
-                        "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' | ')
+                        "ตัวเลขเฉพาะในจอ LCD": numbers_combined,
+                        "ข้อความดิบในจอ LCD": lcd_raw_text.strip().replace('\n', ' | ')
                     })
                 else:
                     all_extracted_data.append({
                         "ชื่อไฟล์": uploaded_file.name,
                         "ประเภทที่พบ": "-",
-                        "สถานะ": "❌ ไม่ผ่าน (ไม่พบ PAC 1 หรือ PAC 3)",
-                        "ตัวเลขทั้งหมดในภาพ": "-",
-                        "ข้อความดิบที่สแกนได้": raw_text.strip().replace('\n', ' | ') if raw_text.strip() else "อ่านไม่ได้"
+                        "สถานะ": "❌ ไม่ผ่าน (ไม่พบป้าย PAC 1 หรือ PAC 3)",
+                        "ตัวเลขเฉพาะในจอ LCD": "-",
+                        "ข้อความดิบในจอ LCD": "ข้ามการอ่าน"
                     })
                     
             except Exception as e:
@@ -81,22 +104,22 @@ def run_app():
         # --- ส่วนแสดงตารางผลลัพธ์ ---
         if all_extracted_data:
             st.markdown("---")
-            st.subheader("📋 ตารางสรุปผลข้อมูล")
+            st.subheader("📋 ตารางสรุปผลข้อมูลเฉพาะจอ LCD")
             
             df = pd.DataFrame(all_extracted_data)
             st.dataframe(df, use_container_width=True)
             
-            with st.expander("🔍 คลิกเพื่อดูข้อความดิบที่ OCR อ่านได้จากแต่ละรูป"):
+            with st.expander("🔍 คลิกเพื่อดูข้อความดิบเฉพาะจอ LCD ที่สแกนได้"):
                 for idx, row in df.iterrows():
                     st.write(f"📁 **{row['ชื่อไฟล์']}** ({row['สถานะ']})")
-                    st.code(row['ข้อความดิบที่สแกนได้'])
+                    st.code(row['ข้อความดิบในจอ LCD'])
                     st.markdown("---")
             
             csv_data = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 ดาวน์โหลดข้อมูลทั้งหมดเป็น CSV",
                 data=csv_data,
-                file_name="pac_extracted_data.csv",
+                file_name="pac_lcd_numbers.csv",
                 mime="text/csv",
                 use_container_width=True
             )
