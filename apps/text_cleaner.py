@@ -2,7 +2,7 @@ import streamlit as st
 import re
 
 def run_app():
-    st.title("🧹 เครื่องมือจัดเรียงและทำความสะอาดข้อความ")
+    st.title("🧹 ร่าง Incident")
     st.write("ระบบจะลบเครื่องหมาย ~, \", อักขระต่างดาว และคัดกรองบรรทัดว่างอย่างแม่นยำ")
 
     col1, col2 = st.columns(2)
