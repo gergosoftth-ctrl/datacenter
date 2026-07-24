@@ -12,7 +12,7 @@ st.sidebar.title("📌 เมนูใช้งาน")
 app_options = {
     "dashboard": "🏠 หน้าแรก (งานฝาก)",
     "deposit_job": "📦 ระบบงานฝาก (ระบบใหม่)",
-    "text_cleaner": "🧹 ระบบทำความสะอาดข้อความ (Text Cleaner)"
+    "text_cleaner": "🧹 ร่าง Incident" #(Text Cleaner)
 }
 
 selected_app_key = st.sidebar.radio(
