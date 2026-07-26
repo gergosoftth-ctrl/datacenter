@@ -21,7 +21,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึง Problems จาก Dynatrace (ดึงทั้ง OPEN และ RESOLVED ล่าสุด) ---
+# --- 1. ดึง Problems จาก Dynatrace (แยก Query ดึง OPEN และ RESOLVED) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -32,20 +32,22 @@ def fetch_dynatrace_problems():
     }
     
     fields_query = "displayId,problemId,title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles,comments"
-    # ดึงปัญหาสถานะ OPEN และ RESOLVED ล่าสุด
-    endpoint = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\",\"RESOLVED\")&fields={fields_query}&pageSize=20"
-    
-    try:
-        res = requests.get(endpoint, headers=headers, timeout=10)
-        if res.status_code == 200:
-            return res.json().get("problems", [])
-        else:
-            st.error(f"❌ ดึงข้อมูลจาก Dynatrace ไม่สำเร็จ (Status Code: {res.status_code})")
-            st.caption(f"Details: {res.text}")
-            return []
-    except Exception as e:
-        st.error(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ Dynatrace: {str(e)}")
-        return []
+    all_problems = []
+
+    # Dynatrace จำกัดให้ query ได้ครั้งละ 1 status -> แยกดึง OPEN และ RESOLVED
+    for status_filter in ["OPEN", "RESOLVED"]:
+        endpoint = f"{dt_url}/api/v2/problems?problemSelector=status(\"{status_filter}\")&fields={fields_query}&pageSize=10"
+        try:
+            res = requests.get(endpoint, headers=headers, timeout=10)
+            if res.status_code == 200:
+                probs = res.json().get("problems", [])
+                all_problems.extend(probs)
+            else:
+                st.warning(f"⚠️ ดึงข้อมูลสถานะ {status_filter} ไม่สำเร็จ (Status: {res.status_code})")
+        except Exception as e:
+            st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล ({status_filter}): {str(e)}")
+
+    return all_problems
 
 # --- 2. ส่ง Comment เข้า Dynatrace ---
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
