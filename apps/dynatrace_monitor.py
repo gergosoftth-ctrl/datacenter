@@ -21,7 +21,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึง Problems จาก Dynatrace (แยก Query ดึง OPEN และ RESOLVED) ---
+# --- 1. ดึง Problems จาก Dynatrace (แยก Query ดึง OPEN และ RESOLVED ย้อนหลัง 24 ชั่วโมง) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -34,18 +34,26 @@ def fetch_dynatrace_problems():
     fields_query = "displayId,problemId,title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles,comments"
     all_problems = []
 
-    # Dynatrace จำกัดให้ query ได้ครั้งละ 1 status -> แยกดึง OPEN และ RESOLVED
-    for status_filter in ["OPEN", "RESOLVED"]:
-        endpoint = f"{dt_url}/api/v2/problems?problemSelector=status(\"{status_filter}\")&fields={fields_query}&pageSize=10"
-        try:
-            res = requests.get(endpoint, headers=headers, timeout=10)
-            if res.status_code == 200:
-                probs = res.json().get("problems", [])
-                all_problems.extend(probs)
-            else:
-                st.warning(f"⚠️ ดึงข้อมูลสถานะ {status_filter} ไม่สำเร็จ (Status: {res.status_code})")
-        except Exception as e:
-            st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล ({status_filter}): {str(e)}")
+    # 1. ดึงรายการสถานะ OPEN ทั้งหมด
+    endpoint_open = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&fields={fields_query}&pageSize=20"
+    try:
+        res_open = requests.get(endpoint_open, headers=headers, timeout=10)
+        if res_open.status_code == 200:
+            all_problems.extend(res_open.json().get("problems", []))
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล OPEN: {str(e)}")
+
+    # 2. ดึงรายการสถานะ RESOLVED ย้อนหลัง 24 ชั่วโมง (เติม from=-24h)
+    endpoint_resolved = f"{dt_url}/api/v2/problems?problemSelector=status(\"RESOLVED\")&from=-24h&fields={fields_query}&pageSize=20"
+    try:
+        res_resolved = requests.get(endpoint_resolved, headers=headers, timeout=10)
+        if res_resolved.status_code == 200:
+            all_problems.extend(res_resolved.json().get("problems", []))
+        else:
+            # กรณีไม่มีสิทธิ์หรือไม่มีข้อมูลในช่วงเวลา ให้ข้ามโดยไม่ขัดจังหวะการทำงาน
+            pass
+    except Exception as e:
+        pass
 
     return all_problems
 
