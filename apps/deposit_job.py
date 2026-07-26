@@ -9,14 +9,6 @@ def init_supabase() -> Client:
     key = st.secrets["supabase"]["SUPABASE_KEY"]
     return create_client(url, key)
 
-# --- 🎯 สร้าง Pop-up แจ้งเตือน (Dialog Modal) ---
-@st.dialog("🎉 บันทึกข้อมูลสำเร็จ!")
-def show_success_popup(message: str):
-    st.write(message)
-    st.markdown("---")
-    if st.button("ตกลง / ปิดหน้าต่าง", type="primary", use_container_width=True):
-        st.rerun()
-
 def run_app():
     st.title("📦 ระบบจัดการงานฝาก (Supabase Database)")
     
@@ -25,6 +17,13 @@ def run_app():
     except Exception as e:
         st.error("❌ ไม่สามารถเชื่อมต่อกับ Supabase ได้ กรุณาตรวจสอบการตั้งค่า Secrets")
         return
+
+    # --- 🎯 ส่วนเช็คค้างแสดง Pop-up แจ้งเตือน ---
+    if "popup_msg" in st.session_state and st.session_state.popup_msg:
+        st.success(st.session_state.popup_msg, icon="🎉")
+        st.toast(st.session_state.popup_msg, icon="✅")
+        # ล้างค่าหลังจากแสดงผลเรียบร้อย
+        st.session_state.popup_msg = None
 
     # --- 1. ฟอร์มเพิ่มงานฝากใหม่ ---
     with st.expander("➕ เพิ่มรายการงานฝากใหม่", expanded=False):
@@ -50,8 +49,10 @@ def run_app():
                         "details": details
                     }
                     supabase.table("deposit_jobs").insert(payload).execute()
-                    # เด้ง Pop-up แจ้งเตือน
-                    show_success_popup(f"บันทึกรายการงานฝาก **{job_code} ({title})** ลงระบบเรียบร้อยแล้ว!")
+                    
+                    # บันทึกข้อความลง session_state เพื่อสั่งโชว์ Pop-up หลัง rerun
+                    st.session_state.popup_msg = f"บันทึกรายการงานฝาก **{job_code} ({title})** เรียบร้อยแล้ว!"
+                    st.rerun()
                 else:
                     st.warning("⚠️ กรุณากรอกรอกรหัสงาน ชื่องาน และผู้ฝากงานให้ครบถ้วน")
 
@@ -68,7 +69,6 @@ def run_app():
         df = pd.DataFrame(jobs_data)
         df_edit = df[["id", "job_code", "title", "created_by", "status", "details"]].copy()
 
-        # กำหนดลักษณะของแต่ละคอลัมน์
         edited_df = st.data_editor(
             df_edit,
             key="jobs_editor",
@@ -104,8 +104,8 @@ def run_app():
                         changes_count += 1
 
                 if changes_count > 0:
-                    # เด้ง Pop-up แจ้งเตือนเมื่ออัปเดตตารางสำเร็จ
-                    show_success_popup(f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**")
+                    st.session_state.popup_msg = f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**"
+                    st.rerun()
                 else:
                     st.info("ℹ️ ไม่พบการเปลี่ยนแปลงข้อมูลในตาราง")
             except Exception as e:
