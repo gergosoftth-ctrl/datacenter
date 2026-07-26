@@ -140,7 +140,8 @@ def run_app():
 
                 if btn_submit:
                     if author_name and comment_input:
-                        dt_success = post_comment_to_dynatrace(prob_id, comment_input, author_name)
+                        # ยิงเฉพาะข้อความ comment_input เข้า Dynatrace
+                        dt_success = post_comment_to_dynatrace(prob_id, comment_input)
                         
                         if dt_success:
                             # บันทึกลง Supabase
