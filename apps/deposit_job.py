@@ -9,6 +9,14 @@ def init_supabase() -> Client:
     key = st.secrets["supabase"]["SUPABASE_KEY"]
     return create_client(url, key)
 
+# --- 🎯 สร้าง Pop-up แจ้งเตือน (Dialog Modal) ---
+@st.dialog("🎉 บันทึกข้อมูลสำเร็จ!")
+def show_success_popup(message: str):
+    st.write(message)
+    st.markdown("---")
+    if st.button("ตกลง / ปิดหน้าต่าง", type="primary", use_container_width=True):
+        st.rerun()
+
 def run_app():
     st.title("📦 ระบบจัดการงานฝาก (Supabase Database)")
     
@@ -42,8 +50,8 @@ def run_app():
                         "details": details
                     }
                     supabase.table("deposit_jobs").insert(payload).execute()
-                    st.success("✅ บันทึกข้อมูลงานฝากลง Supabase เรียบร้อยแล้ว!")
-                    st.rerun()
+                    # เด้ง Pop-up แจ้งเตือน
+                    show_success_popup(f"บันทึกรายการงานฝาก **{job_code} ({title})** ลงระบบเรียบร้อยแล้ว!")
                 else:
                     st.warning("⚠️ กรุณากรอกรอกรหัสงาน ชื่องาน และผู้ฝากงานให้ครบถ้วน")
 
@@ -58,19 +66,16 @@ def run_app():
 
     if jobs_data:
         df = pd.DataFrame(jobs_data)
-
-        # จัดเตรียม DataFrame สำหรับ Data Editor
-        # รวม id ไว้ใช้เป็น primary key สำหรับการอัปเดต แต่ซ่อนไว้ในคอลัมน์ของ Streamlit
         df_edit = df[["id", "job_code", "title", "created_by", "status", "details"]].copy()
 
-        # กำหนดลักษณะของแต่ละคอลัมน์ (ให้แก้ไขได้เฉพาะ status และ details)
+        # กำหนดลักษณะของแต่ละคอลัมน์
         edited_df = st.data_editor(
             df_edit,
             key="jobs_editor",
             width="stretch",
             hide_index=True,
             column_config={
-                "id": None,  # ซ่อนคอลัมน์ id ไม่ให้ผู้ใช้เห็น
+                "id": None,
                 "job_code": st.column_config.TextColumn("รหัสงาน", disabled=True),
                 "title": st.column_config.TextColumn("รายการ", disabled=True),
                 "created_by": st.column_config.TextColumn("ผู้ฝาก", disabled=True),
@@ -84,15 +89,13 @@ def run_app():
             }
         )
 
-        # ปุ่มบันทึกการเปลี่ยนแปลงเมื่อมีการแก้ไขตาราง
+        # ปุ่มบันทึกการแก้ไขเมื่อมีการปรับแต่งตาราง
         if st.button("💾 บันทึกการแก้ไขลง Database", type="primary"):
             try:
-                # เช็คว่ามีแถวไหนที่ถูกแก้ไขบ้าง โดยเปรียบเทียบกับ DataFrame ต้นฉบับ
                 changes_count = 0
                 for index, row in edited_df.iterrows():
                     original_row = df_edit.loc[index]
                     
-                    # ถ้าสถานะ หรือ รายละเอียด เปลี่ยนไปจากเดิม ให้ยิง UPDATE ไปที่ Supabase
                     if (row["status"] != original_row["status"]) or (row["details"] != original_row["details"]):
                         supabase.table("deposit_jobs").update({
                             "status": row["status"],
@@ -101,8 +104,8 @@ def run_app():
                         changes_count += 1
 
                 if changes_count > 0:
-                    st.success(f"✅ อัปเดตข้อมูลสำเร็จทั้งหมด {changes_count} รายการ!")
-                    st.rerun()
+                    # เด้ง Pop-up แจ้งเตือนเมื่ออัปเดตตารางสำเร็จ
+                    show_success_popup(f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**")
                 else:
                     st.info("ℹ️ ไม่พบการเปลี่ยนแปลงข้อมูลในตาราง")
             except Exception as e:
