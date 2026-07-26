@@ -21,7 +21,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึง Problems จาก Dynatrace (ดึง Fields พิเศษเพิ่ม) ---
+# --- 1. ดึง Problems จาก Dynatrace (ดึงทั้ง OPEN และ RESOLVED ล่าสุด) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -31,9 +31,9 @@ def fetch_dynatrace_problems():
         "Content-Type": "application/json"
     }
     
-    # เพิ่ม fields เพื่อดึง impactedEntities, managementZones, alertingProfiles, endTime
-    fields_query = "title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles"
-    endpoint = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&fields={fields_query}"
+    fields_query = "displayId,problemId,title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles,comments"
+    # ดึงปัญหาสถานะ OPEN และ RESOLVED ล่าสุด
+    endpoint = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\",\"RESOLVED\")&fields={fields_query}&pageSize=20"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=10)
@@ -69,16 +69,15 @@ def post_comment_to_dynatrace(problem_id: str, comment_text: str):
         st.error(f"❌ Error sending comment: {str(e)}")
         return False
 
-# --- ฟังก์ชันคำนวณ Duration ---
+# --- 3. คำนวณ Duration ( Start Date -> Resolve Date ) ---
 def calculate_duration(start_ms, end_ms):
     if not end_ms or end_ms == -1:
-        # หากยังไม่ Resolve ให้คำนวณจาก Start จนถึง เวลาปัจจุบัน
         now_ms = datetime.now().timestamp() * 1000
         diff_sec = int((now_ms - start_ms) / 1000)
         suffix = " (Active)"
     else:
         diff_sec = int((end_ms - start_ms) / 1000)
-        suffix = ""
+        suffix = " (Resolved)"
 
     hours = diff_sec // 3600
     minutes = (diff_sec % 3600) // 60
@@ -86,6 +85,40 @@ def calculate_duration(start_ms, end_ms):
     if hours > 0:
         return f"{hours}h {minutes}m{suffix}"
     return f"{minutes}m{suffix}"
+
+# --- 4. ฟังก์ชัน Sync สภาวะ RESOLVED และ Comment ล่าสุดเข้า DB ---
+def sync_resolved_status_to_db(supabase: Client, problems: list):
+    for prob in problems:
+        # ใช้ displayId (เช่น P-26074675) ถ้าไม่มีให้ใช้ problemId
+        display_id = prob.get("displayId") or prob.get("problemId")
+        dt_status = prob.get("status")
+        start_ms = prob.get("startTime", 0)
+        end_ms = prob.get("endTime", -1)
+        
+        # ดึง Comment ล่าสุดจาก Dynatrace (ถ้ามี)
+        dt_comments = prob.get("comments", [])
+        latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
+
+        # เช็กว่า Problem นี้มีใน DB ของเราแล้วหรือยัง
+        existing = supabase.table("alarm_comments").select("*").eq("problem_id", display_id).execute().data
+        
+        if existing:
+            # คำนวณ Duration ล่าสุด
+            duration_str = calculate_duration(start_ms, end_ms)
+            end_date_str = datetime.fromtimestamp(end_ms / 1000.0, tz=TZ_TH).strftime('%b %d %H:%M') if end_ms > 0 else "-"
+
+            update_data = {
+                "status": dt_status,
+                "duration": duration_str,
+                "end_date": end_date_str
+            }
+            
+            # ถ้ามี Comment ล่าสุดใน Dynatrace ให้อัปเดต comment_text ใน DB ด้วย
+            if latest_dt_comment:
+                update_data["comment_text"] = latest_dt_comment
+
+            # ทำการ UPDATE ข้อมูลใน DB
+            supabase.table("alarm_comments").update(update_data).eq("problem_id", display_id).execute()
 
 def run_app():
     st.title("🚨 Dynatrace Alarm Monitor & Comment Center")
@@ -108,35 +141,45 @@ def run_app():
         problems = fetch_dynatrace_problems()
 
     if not problems:
-        st.success("✅ ไม่พบ Alarm / Problem ที่เปิดอยู่บน Dynatrace ในขณะนี้")
+        st.success("✅ ไม่พบ Alarm / Problem ในระบบขณะนี้")
         return
 
-    st.subheader(f"⚠️ รายการ Alarm ที่กำลังเกิดขึ้น ({len(problems)} รายการ)")
+    # สั่ง Auto-sync สถานะ Resolve และ Comment ล่าสุดลง DB
+    sync_resolved_status_to_db(supabase, problems)
 
-    for prob in problems:
-        prob_id = prob.get("problemId")
-        title = prob.get("title")  # Problem Name
+    # กรองแสดงเฉพาะรายการ OPEN บนหน้าแอป
+    open_problems = [p for p in problems if p.get("status") == "OPEN"]
+
+    st.subheader(f"⚠️ รายการ Alarm ที่กำลังเกิดขึ้น ({len(open_problems)} รายการ)")
+
+    if not open_problems:
+        st.success("✅ ไม่มี Alarm สถานะ OPEN ในขณะนี้ (รายการที่แก้ไขแล้วถูกอัปเดตลง DB เรียบร้อยแล้ว)")
+
+    for prob in open_problems:
+        # แก้ไขจุด Problem ID: ดึง displayId (เช่น P-26074675) มาใช้
+        prob_id = prob.get("displayId") or prob.get("problemId")
+        internal_id = prob.get("problemId") # ใช้ส่ง API ให้ Dynatrace
+        title = prob.get("title")
         severity = prob.get("severityLevel", "UNKNOWN")
         start_time_ms = prob.get("startTime", 0)
         end_time_ms = prob.get("endTime", -1)
         
-        # 1. แปลง Start Date (รูปแบบ Jul 26 18:02)
+        # 1. Start Date (เช่น Jul 26 18:02)
         start_dt_obj = datetime.fromtimestamp(start_time_ms / 1000.0, tz=TZ_TH)
         start_date_str = start_dt_obj.strftime('%b %d %H:%M')
-        start_date_iso = start_dt_obj.isoformat()
 
-        # 2. คำนวณ Duration
+        # 2. Duration (คำนวณเวลาที่ผ่านไป)
         duration_str = calculate_duration(start_time_ms, end_time_ms)
 
-        # 3. ดึง Management Zones
+        # 3. Management Zones
         mz_list = [mz.get("name") for mz in prob.get("managementZones", [])]
         mz_str = ", ".join(mz_list) if mz_list else "Default"
 
-        # 4. ดึง Impacted Entity
+        # 4. Impacted Entity
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])]
         impacted_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # 5. ดึง Alerting Profiles
+        # 5. Alerting Profiles
         profile_list = [ap.get("name") for ap in prob.get("alertingProfiles", [])]
         profile_str = ", ".join(profile_list) if profile_list else "Default"
 
@@ -154,8 +197,8 @@ def run_app():
                 st.write(f"**Start Date:** {start_date_str}")
                 st.write(f"**Duration:** {duration_str}")
             
-            # ลิงก์ยิงตรงไปหน้า Classic Problems
-            dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={prob_id}"
+            # ลิงก์ตรงเปิดดูใน Dynatrace Classic UI
+            dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
             st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
 
             st.markdown("---")
@@ -185,21 +228,21 @@ def run_app():
 
                 if btn_submit:
                     if user_name and comment_input:
-                        # 1. ยิงข้อความเพียวๆ เข้า Dynatrace
-                        dt_success = post_comment_to_dynatrace(prob_id, comment_input)
+                        # ยิง Comment เข้า Dynatrace ผ่าน internal_id
+                        dt_success = post_comment_to_dynatrace(internal_id, comment_input)
                         
                         if dt_success:
-                            # 2. บันทึกข้อมูลครบทุกลดทั้ง 8 ข้อลง Supabase DB
                             db_payload = {
                                 "user_name": user_name,
-                                "problem_id": prob_id,
+                                "problem_id": prob_id, # เก็บเป็น P-26074675
                                 "management_zones": mz_str,
                                 "problem_name": title,
                                 "impacted_entity": impacted_str,
                                 "alerting_profiles": profile_str,
-                                "start_date": start_date_iso,
+                                "start_date": start_date_str,
                                 "duration": duration_str,
-                                "comment_text": comment_input
+                                "comment_text": comment_input,
+                                "status": "OPEN"
                             }
                             supabase.table("alarm_comments").insert(db_payload).execute()
                             
