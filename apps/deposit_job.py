@@ -1,8 +1,12 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
+import pytz
 from supabase import create_client, Client
 
-# ดึงค่าการเชื่อมต่อจาก secrets
+# ตั้งค่า Timezone ประเทศไทย (GMT+7)
+TZ_TH = pytz.timezone('Asia/Bangkok')
+
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["SUPABASE_URL"]
@@ -18,13 +22,12 @@ def run_app():
         st.error("❌ ไม่สามารถเชื่อมต่อกับ Supabase ได้ กรุณาตรวจสอบการตั้งค่า Secrets")
         return
 
-    # --- 🎯 1. ส่วนควบคุม Pop-up กล่องข้อความแจ้งเตือนตรงกลาง ---
+    # --- 🎯 1. ส่วน Pop-up แจ้งเตือน ---
     if "show_popup" not in st.session_state:
         st.session_state.show_popup = False
     if "popup_text" not in st.session_state:
         st.session_state.popup_text = ""
 
-    # หากมีสถานะสั่งโชว์ Pop-up ให้แสดงกล่องแจ้งเตือนเน้นๆ บนสุด
     if st.session_state.show_popup:
         with st.container():
             st.markdown("---")
@@ -40,45 +43,65 @@ def run_app():
         with st.form("add_job_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                job_code = st.text_input("รหัสงาน (เช่น JOB-001):")
-                title = st.text_input("ชื่องาน / รายการฝาก:")
-            with col2:
+                # ข้อ 2: รายการมีให้เลือกแค่ Deployment กับ Refreshment
+                title = st.selectbox("รายการฝาก:", ["Deployment", "Refreshment"])
                 created_by = st.text_input("ชื่อผู้ฝากงาน:")
                 status = st.selectbox("สถานะเริ่มต้น:", ["รอดำเนินการ", "กำลังดำเนินการ", "เสร็จสิ้น"])
             
+            with col2:
+                # ข้อ 3: วันเวลา Start Date และ End Date
+                start_date_val = st.date_input("วันที่เริ่มต้น (Start Date):")
+                start_time_val = st.time_input("เวลาเริ่มต้น:", value=datetime.now().time())
+                
+                end_date_val = st.date_input("วันที่สิ้นสุด (End Date):")
+                end_time_val = st.time_input("เวลาสิ้นสุด:", value=datetime.now().time())
+
             details = st.text_area("รายละเอียดเพิ่มเติม:")
             submitted = st.form_submit_button("💾 บันทึกงานฝาก")
 
             if submitted:
-                if job_code and title and created_by:
+                if title and created_by:
+                    # รวม Date + Time และแปลงเป็น ISO Format สำหรับเก็บใน Supabase
+                    start_dt = datetime.combine(start_date_val, start_time_val).astimezone(TZ_TH).isoformat()
+                    end_dt = datetime.combine(end_date_val, end_time_val).astimezone(TZ_TH).isoformat()
+
                     payload = {
-                        "job_code": job_code,
                         "title": title,
                         "created_by": created_by,
                         "status": status,
+                        "start_date": start_dt,
+                        "end_date": end_dt,
                         "details": details
                     }
                     supabase.table("deposit_jobs").insert(payload).execute()
                     
-                    # ตั้งค่าให้สั่งแสดง Pop-up
                     st.session_state.show_popup = True
-                    st.session_state.popup_text = f"บันทึกรายการงานฝาก **{job_code} ({title})** ลงระบบเรียบร้อยแล้ว!"
+                    st.session_state.popup_text = f"บันทึกรายการ **{title}** โดยคุณ {created_by} เรียบร้อยแล้ว!"
                     st.rerun()
                 else:
-                    st.warning("⚠️ กรุณากรอกรอกรหัสงาน ชื่องาน และผู้ฝากงานให้ครบถ้วน")
+                    st.warning("⚠️ กรุณากรอกชื่อผู้ฝากงานให้ครบถ้วน")
 
     st.markdown("---")
 
-    # --- 3. แสดงตารางข้อมูลพร้อมฟังก์ชันแก้ไข ---
-    st.subheader("📋 รายการงานฝากทั้งหมดในระบบ")
-    st.caption("💡 คุณสามารถ **คลิกเปลี่ยนสถานะ** หรือ **ดับเบิลคลิกแก้ไขรายละเอียด** ในตาราง แล้วกดปุ่มบันทึกด้านล่างได้เลยครับ")
+    # --- 3. แสดงตารางข้อมูล (ดึงเฉพาะงานที่ยังไม่หมดอายุ) ---
+    st.subheader("📋 รายการงานฝากที่กำลังใช้งาน")
+    st.caption("💡 ระบบจะแสดงเฉพาะรายการที่ยังไม่หมดอายุ (End Date เกินปัจจุบันจะถูกซ่อนจากหน้าจออัตโนมัติ)")
 
-    response = supabase.table("deposit_jobs").select("*").order("id", desc=True).execute()
+    # ข้อ 4: ดึงเฉพาะรายการที่ end_date >= วันเวลาปัจจุบัน
+    now_iso = datetime.now(TZ_TH).isoformat()
+    response = supabase.table("deposit_jobs").select("*").gte("end_date", now_iso).order("id", desc=True).execute()
     jobs_data = response.data
 
     if jobs_data:
         df = pd.DataFrame(jobs_data)
-        df_edit = df[["id", "job_code", "title", "created_by", "status", "details"]].copy()
+
+        # ข้อ 5: แปลงฟอร์แมตวันเวลาเป็น DD-MM-YYYY HH:MM (24hr)
+        if "start_date" in df.columns and "end_date" in df.columns:
+            df["start_date_fmt"] = pd.to_datetime(df["start_date"]).dt.tz_convert('Asia/Bangkok').dt.strftime('%d-%m-%Y %H:%M')
+            df["end_date_fmt"] = pd.to_datetime(df["end_date"]).dt.tz_convert('Asia/Bangkok').dt.strftime('%d-%m-%Y %H:%M')
+
+        # ข้อ 1: เอารหัสพนักงาน/รหัสงานออก เลือกแสดงเฉพาะคอลัมน์ที่ต้องการ
+        df_edit = df[["id", "title", "created_by", "status", "start_date_fmt", "end_date_fmt", "details"]].copy()
 
         edited_df = st.data_editor(
             df_edit,
@@ -87,20 +110,19 @@ def run_app():
             hide_index=True,
             column_config={
                 "id": None,
-                "job_code": st.column_config.TextColumn("รหัสงาน", disabled=True),
                 "title": st.column_config.TextColumn("รายการ", disabled=True),
                 "created_by": st.column_config.TextColumn("ผู้ฝาก", disabled=True),
+                "start_date_fmt": st.column_config.TextColumn("Start Date", disabled=True),
+                "end_date_fmt": st.column_config.TextColumn("End Date", disabled=True),
                 "status": st.column_config.SelectboxColumn(
                     "สถานะ",
-                    help="เลือกสถานะของงานฝาก",
                     options=["รอดำเนินการ", "กำลังดำเนินการ", "เสร็จสิ้น"],
                     required=True
                 ),
-                "details": st.column_config.TextColumn("รายละเอียด", help="ดับเบิลคลิกเพื่อแก้ไขข้อความ"),
+                "details": st.column_config.TextColumn("รายละเอียด"),
             }
         )
 
-        # ปุ่มบันทึกการแก้ไขลง Database
         if st.button("💾 บันทึกการแก้ไขลง Database", type="primary"):
             try:
                 changes_count = 0
@@ -115,9 +137,8 @@ def run_app():
                         changes_count += 1
 
                 if changes_count > 0:
-                    # ตั้งค่าเปิด Pop-up แจ้งเตือนเมื่ออัปเดตสำเร็จ
                     st.session_state.show_popup = True
-                    st.session_state.popup_text = f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**"
+                    st.session_state.popup_text = f"อัปเดตข้อมูลสำเร็จแล้ว **{changes_count} รายการ**"
                     st.rerun()
                 else:
                     st.info("ℹ️ ไม่พบการเปลี่ยนแปลงข้อมูลในตาราง")
@@ -125,4 +146,4 @@ def run_app():
                 st.error(f"❌ เกิดข้อผิดพลาดในการอัปเดตข้อมูล: {str(e)}")
 
     else:
-        st.info("💡 ยังไม่มีข้อมูลงานฝากในระบบ กดปุ่ม 'เพิ่มรายการงานฝากใหม่' ด้านบนเพื่อเริ่มเพิ่มข้อมูล")
+        st.info("💡 ไม่พบรายการงานฝากที่เปิดใช้งานอยู่ (หรือรายการทั้งหมดหมดอายุแล้ว)")
