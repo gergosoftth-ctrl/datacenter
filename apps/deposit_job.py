@@ -18,14 +18,24 @@ def run_app():
         st.error("❌ ไม่สามารถเชื่อมต่อกับ Supabase ได้ กรุณาตรวจสอบการตั้งค่า Secrets")
         return
 
-    # --- 🎯 ส่วนเช็คค้างแสดง Pop-up แจ้งเตือน ---
-    if "popup_msg" in st.session_state and st.session_state.popup_msg:
-        st.success(st.session_state.popup_msg, icon="🎉")
-        st.toast(st.session_state.popup_msg, icon="✅")
-        # ล้างค่าหลังจากแสดงผลเรียบร้อย
-        st.session_state.popup_msg = None
+    # --- 🎯 1. ส่วนควบคุม Pop-up กล่องข้อความแจ้งเตือนตรงกลาง ---
+    if "show_popup" not in st.session_state:
+        st.session_state.show_popup = False
+    if "popup_text" not in st.session_state:
+        st.session_state.popup_text = ""
 
-    # --- 1. ฟอร์มเพิ่มงานฝากใหม่ ---
+    # หากมีสถานะสั่งโชว์ Pop-up ให้แสดงกล่องแจ้งเตือนเน้นๆ บนสุด
+    if st.session_state.show_popup:
+        with st.container():
+            st.markdown("---")
+            st.success(f"### 🎉 แจ้งเตือนการบันทึกข้อมูล\n\n{st.session_state.popup_text}")
+            if st.button("❌ ปิดหน้าต่างแจ้งเตือน", type="primary", use_container_width=True):
+                st.session_state.show_popup = False
+                st.session_state.popup_text = ""
+                st.rerun()
+            st.markdown("---")
+
+    # --- 2. ฟอร์มเพิ่มงานฝากใหม่ ---
     with st.expander("➕ เพิ่มรายการงานฝากใหม่", expanded=False):
         with st.form("add_job_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
@@ -50,15 +60,16 @@ def run_app():
                     }
                     supabase.table("deposit_jobs").insert(payload).execute()
                     
-                    # บันทึกข้อความลง session_state เพื่อสั่งโชว์ Pop-up หลัง rerun
-                    st.session_state.popup_msg = f"บันทึกรายการงานฝาก **{job_code} ({title})** เรียบร้อยแล้ว!"
+                    # ตั้งค่าให้สั่งแสดง Pop-up
+                    st.session_state.show_popup = True
+                    st.session_state.popup_text = f"บันทึกรายการงานฝาก **{job_code} ({title})** ลงระบบเรียบร้อยแล้ว!"
                     st.rerun()
                 else:
                     st.warning("⚠️ กรุณากรอกรอกรหัสงาน ชื่องาน และผู้ฝากงานให้ครบถ้วน")
 
     st.markdown("---")
 
-    # --- 2. แสดงตารางข้อมูลพร้อมฟังก์ชันแก้ไข (Status & Details) ---
+    # --- 3. แสดงตารางข้อมูลพร้อมฟังก์ชันแก้ไข ---
     st.subheader("📋 รายการงานฝากทั้งหมดในระบบ")
     st.caption("💡 คุณสามารถ **คลิกเปลี่ยนสถานะ** หรือ **ดับเบิลคลิกแก้ไขรายละเอียด** ในตาราง แล้วกดปุ่มบันทึกด้านล่างได้เลยครับ")
 
@@ -89,7 +100,7 @@ def run_app():
             }
         )
 
-        # ปุ่มบันทึกการแก้ไขเมื่อมีการปรับแต่งตาราง
+        # ปุ่มบันทึกการแก้ไขลง Database
         if st.button("💾 บันทึกการแก้ไขลง Database", type="primary"):
             try:
                 changes_count = 0
@@ -104,7 +115,9 @@ def run_app():
                         changes_count += 1
 
                 if changes_count > 0:
-                    st.session_state.popup_msg = f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**"
+                    # ตั้งค่าเปิด Pop-up แจ้งเตือนเมื่ออัปเดตสำเร็จ
+                    st.session_state.show_popup = True
+                    st.session_state.popup_text = f"อัปเดตสถานะและรายละเอียดข้อมูลลง Database สำเร็จแล้ว **{changes_count} รายการ**"
                     st.rerun()
                 else:
                     st.info("ℹ️ ไม่พบการเปลี่ยนแปลงข้อมูลในตาราง")
