@@ -21,8 +21,9 @@ def run_app():
         cleaned_text = input_text
         
         if input_text:
-            # เงื่อนไขที่ 1-3: ลบอักขระที่ไม่ต้องการออกก่อน
+            # เงื่อนไขที่ 1-4: ลบอักขระที่ไม่ต้องการออกก่อน
             cleaned_text = cleaned_text.replace('~', '')
+            cleaned_text = cleaned_text.replace('$', '')
             cleaned_text = cleaned_text.replace('"', '')
             cleaned_text = re.sub(r'[\uE000-\uF8FF]', '', cleaned_text)
             
