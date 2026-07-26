@@ -46,7 +46,7 @@ def fetch_dynatrace_problems():
         return []
 
 # --- 2. ส่ง Comment เข้า Dynatrace ---
-def post_comment_to_dynatrace(problem_id: str, comment_text: str, author: str):
+def post_comment_to_dynatrace(problem_id: str, comment_text: str):
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     
@@ -56,8 +56,10 @@ def post_comment_to_dynatrace(problem_id: str, comment_text: str, author: str):
     }
     
     endpoint = f"{dt_url}/api/v2/problems/{problem_id}/comments"
+    
+    # ปรับเหลือเฉพาะข้อความ comment เพียวๆ
     payload = {
-        "message": f"[{author} via Dashboard]: {comment_text}"
+        "message": comment_text
     }
     
     try:
