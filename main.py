@@ -56,10 +56,14 @@ if st.session_state.selected_app == "dashboard":
     ]
     st.dataframe(sample_data, width="stretch")
 
-# 📦 2. เมนูงานฝาก (ระบบใหม่ - รอการกำหนดฟังก์ชัน)
+# 📦 2. เมนูงานฝาก (ระบบใหม่ - เชื่อมต่อ Supabase)
 elif st.session_state.selected_app == "deposit_job":
-    st.title("📦 ระบบงานฝาก")
-    st.info("🚧 ฟังก์ชันนี้กำลังอยู่ระหว่างการพัฒนา (เตรียมไว้สำหรับกำหนดรายละเอียดเพิ่มในขั้นตอนถัดไป)")
+    try:
+        from apps import deposit_job
+        deposit_job.run_app()
+    except ModuleNotFoundError:
+        st.error("❌ ไม่พบไฟล์ `deposit_job.py` ในโฟลเดอร์ `apps`")
+        st.info("กรุณาตรวจสอบว่ามีไฟล์ `apps/deposit_job.py` บน GitHub เรียบร้อยแล้ว")
 
 # 🧹 3. หน้า Text Cleaner
 elif st.session_state.selected_app == "text_cleaner":
@@ -69,3 +73,4 @@ elif st.session_state.selected_app == "text_cleaner":
     except ModuleNotFoundError:
         st.error("❌ ไม่พบไฟล์ `text_cleaner.py` ในโฟลเดอร์ `apps`")
         st.info("กรุณาตรวจสอบว่ามีไฟล์ `apps/text_cleaner.py` ใน GitHub เรียบร้อยแล้ว")
+
