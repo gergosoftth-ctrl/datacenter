@@ -21,7 +21,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึง Problems จาก Dynatrace (แยกดึง OPEN และ RESOLVED ย้อนหลัง) ---
+# --- 1. ดึง Problems จาก Dynatrace (เน้นเรียบง่ายและเสถียร) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -31,20 +31,22 @@ def fetch_dynatrace_problems():
         "Content-Type": "application/json"
     }
     
-    fields_query = "displayId,problemId,title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles,comments"
     all_problems = []
 
-    # 1.1 ดึงรายการ OPEN ทั้งหมด (ย้อนหลัง 30 วัน เผื่อ Alarm ที่ค้างนาน)
-    endpoint_open = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&from=-720h&fields={fields_query}&pageSize=50"
+    # 1.1 ดึงรายการ OPEN ย้อนหลัง 30 วัน (ดึง Basic Fields ป้องกัน API ปฏิเสธ)
+    endpoint_open = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&from=-720h&pageSize=50"
     try:
         res_open = requests.get(endpoint_open, headers=headers, timeout=10)
         if res_open.status_code == 200:
             all_problems.extend(res_open.json().get("problems", []))
+        else:
+            st.error(f"❌ ดึงข้อมูล OPEN ไม่สำเร็จ (Status: {res_open.status_code})")
+            st.caption(f"Details: {res_open.text}")
     except Exception as e:
-        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล OPEN: {str(e)}")
+        st.error(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ Dynatrace: {str(e)}")
 
-    # 1.2 ดึงรายการ RESOLVED ย้อนหลัง 72 ชั่วโมง เพื่อเอามา Sync Update ใน DB
-    endpoint_resolved = f"{dt_url}/api/v2/problems?problemSelector=status(\"RESOLVED\")&from=-72h&fields={fields_query}&pageSize=50"
+    # 1.2 ดึงรายการ RESOLVED ย้อนหลัง 72 ชม. เพื่อนำไปอัปเดตสถานะใน DB
+    endpoint_resolved = f"{dt_url}/api/v2/problems?problemSelector=status(\"RESOLVED\")&from=-72h&pageSize=50"
     try:
         res_resolved = requests.get(endpoint_resolved, headers=headers, timeout=10)
         if res_resolved.status_code == 200:
@@ -104,7 +106,6 @@ def sync_resolved_status_to_db(supabase: Client, problems: list):
         dt_comments = prob.get("comments", [])
         latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
 
-        # เช็กเฉพาะ Problem ที่เคยบันทึกไว้ใน DB
         existing = supabase.table("alarm_comments").select("*").eq("problem_id", display_id).execute().data
         
         if existing:
@@ -143,7 +144,6 @@ def run_app():
     with st.spinner("กำลังดึงข้อมูล Alarm ล่าสุดจาก Dynatrace..."):
         problems = fetch_dynatrace_problems()
 
-    # สั่ง Sync สถานะ Resolve และ Comment ลง DB ทันทีที่มีข้อมูล
     if problems:
         sync_resolved_status_to_db(supabase, problems)
 
@@ -157,25 +157,30 @@ def run_app():
         return
 
     for prob in open_problems:
-        prob_id = prob.get("displayId") or prob.get("problemId") # เช่น P-26074675
-        internal_id = prob.get("problemId")                      # ID สำหรับยิง API
-        title = prob.get("title")
+        internal_id = prob.get("problemId")
+        # ดึง displayId หากไม่มีจะนำ displayId จาก Dynatrace หรือ fallback เป็น displayId Format
+        prob_id = prob.get("displayId") if prob.get("displayId") else f"P-{internal_id}"
+        
+        title = prob.get("title", "Unknown Problem")
         severity = prob.get("severityLevel", "UNKNOWN")
         start_time_ms = prob.get("startTime", 0)
         end_time_ms = prob.get("endTime", -1)
         
-        start_dt_obj = datetime.fromtimestamp(start_time_ms / 1000.0, tz=TZ_TH)
+        start_dt_obj = datetime.fromtimestamp(start_time_ms / 1000.0, tz=TZ_TH) if start_time_ms else datetime.now(TZ_TH)
         start_date_str = start_dt_obj.strftime('%b %d %H:%M')
 
         duration_str = calculate_duration(start_time_ms, end_time_ms)
 
-        mz_list = [mz.get("name") for mz in prob.get("managementZones", [])]
+        # จัดการ Management Zones
+        mz_list = [mz.get("name") for mz in prob.get("managementZones", [])] if prob.get("managementZones") else []
         mz_str = ", ".join(mz_list) if mz_list else "Default"
 
-        impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])]
+        # จัดการ Impacted Entity
+        impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impacted_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        profile_list = [ap.get("name") for ap in prob.get("alertingProfiles", [])]
+        # จัดการ Alerting Profiles
+        profile_list = [ap.get("name") for ap in prob.get("alertingProfiles", [])] if prob.get("alertingProfiles") else []
         profile_str = ", ".join(profile_list) if profile_list else "Default"
 
         badge_color = "🔴" if severity in ["AVAILABILITY", "ERROR", "CRITICAL"] else "🟠"
@@ -192,6 +197,7 @@ def run_app():
                 st.write(f"**Start Date:** {start_date_str}")
                 st.write(f"**Duration:** {duration_str}")
             
+            # ลิงก์ตรงเปิดดูใน Dynatrace UI
             dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
             st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
 
@@ -211,12 +217,12 @@ def run_app():
 
             # --- ฟอร์มส่ง Comment ใหม่ ---
             st.markdown("✏️ **เพิ่ม Comment ใหม่ (ส่งตรงเข้า Dynatrace & DB):**")
-            with st.form(key=f"form_comment_{prob_id}", clear_on_submit=True):
+            with st.form(key=f"form_comment_{internal_id}", clear_on_submit=True):
                 col_a, col_b = st.columns([1, 2])
                 with col_a:
-                    user_name = st.text_input("ชื่อผู้ลง Comment (User):", key=f"author_{prob_id}")
+                    user_name = st.text_input("ชื่อผู้ลง Comment (User):", key=f"author_{internal_id}")
                 with col_b:
-                    comment_input = st.text_input("ข้อความ Comment:", key=f"msg_{prob_id}")
+                    comment_input = st.text_input("ข้อความ Comment:", key=f"msg_{internal_id}")
 
                 btn_submit = st.form_submit_button("🚀 ส่ง Comment เข้า Dynatrace & บันทึก DB")
 
