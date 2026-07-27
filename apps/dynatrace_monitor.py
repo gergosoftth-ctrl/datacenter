@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 import time
 from supabase import create_client, Client
+from streamlit_autorefresh import st_autorefresh
 
 TZ_TH = pytz.timezone('Asia/Bangkok')
 
@@ -78,7 +79,6 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 🎯 แก้ไขฟังก์ชันให้รับ 2 พารามิเตอร์ตามเดิม ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     if not problems:
         return
@@ -215,7 +215,10 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 st.write(f"**Incident:** `{item['incident'] if item['incident'] else '-'}`")
 
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
-            st.write(f"**Remark (Comment):** {item['remark'] if item['remark'] else '-'}")
+            
+            # แสดง Remark โดยรองรับข้อความหลายบรรทัด
+            remark_text = item['remark'] if item['remark'] else '-'
+            st.markdown(f"**Remark (Comment):**\n```\n{remark_text}\n```")
             
             if internal_id:
                 dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
@@ -239,13 +242,11 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
-            # 2. Remark -> อัปเดต DB & ยิงไป Dynatrace
-with action_col2:
-    st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
-    with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
-        # 🎯 เปลี่ยนเป็น st.text_area และกำหนด height ให้เหมาะสม
-        new_remark = st.text_area("กรอก Remark / Comment (กด Enter ขึ้นบรรทัดใหม่ได้):", key=f"input_remark_{db_id}", height=100)
-        btn_remark = st.form_submit_button("🚀 บันทึก Remark")
+            with action_col2:
+                st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
+                with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
+                    new_remark = st.text_area("กรอก Remark / Comment (กด Enter ขึ้นบรรทัดใหม่ได้):", key=f"input_remark_{db_id}", height=100)
+                    btn_remark = st.form_submit_button("🚀 บันทึก Remark")
 
                     if btn_remark and new_remark:
                         try:
@@ -273,6 +274,9 @@ with action_col2:
 
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
+
+    # ใช้ st_autorefresh ทุกๆ 10,000 ms (10 วินาที) แทน time.sleep เพื่อไม่ให้กระทบปุ่มกดบน UI
+    st_autorefresh(interval=10000, key="dt_dashboard_auto_refresh")
 
     try:
         supabase = init_supabase()
@@ -313,7 +317,3 @@ def run_app():
     with tab_resolved:
         st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว")
         render_alarm_list(supabase, resolved_res, is_active_tab=False)
-
-    # วนลูป Auto Rerun ทุก 10 วินาที
-    time.sleep(10)
-    st.rerun()
