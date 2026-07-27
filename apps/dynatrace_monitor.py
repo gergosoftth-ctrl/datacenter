@@ -25,7 +25,6 @@ def fetch_dynatrace_problems():
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # เพิ่ม fields=comments เข้าไปในการดึง API เพื่อเอา Remark/Comment ล่าสุดของ Dynatrace
     endpoint = f"{dt_url}/api/v2/problems?pageSize=30&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
     
     try:
@@ -74,7 +73,7 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
         return True
 
 def sync_dynatrace_to_db(supabase: Client, problems: list):
-    """ ดึง Alarm จาก Dynatrace เข้า Supabase และดึง Comment ล่าสุดเข้า DB เมื่อ Resolve """
+    """ ดึง Alarm จาก Dynatrace เข้า Supabase พร้อมระบุ type = 'Dynatrace' """
     seen_ids = set()
     unique_problems = []
     for p in problems:
@@ -104,7 +103,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # ดึง Comment/Remark ล่าสุดจาก Dynatrace Alert (ถ้ามี)
+        # ดึง Comment ล่าสุดจาก Dynatrace
         dt_comments = prob.get("comments", [])
         latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
 
@@ -112,6 +111,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
 
         if not existing:
             db_payload = {
+                "type": "Dynatrace",           # บันทึกชนิดเป็น Dynatrace
                 "problem_id": display_id,
                 "internal_id": internal_id,
                 "status": dt_status,
@@ -122,7 +122,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 "duration": duration_str,
                 "resolve_date": resolve_dt_str if end_ms > 0 else None,
                 "ack": None,
-                "remark": latest_dt_comment,  # บันทึก Comment จาก Dynatrace ลง DB
+                "remark": latest_dt_comment,
                 "incident": None
             }
             try:
@@ -136,7 +136,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 "impact": impact_str,
                 "resolve_date": resolve_dt_str if end_ms > 0 else None
             }
-            # หากเปลี่ยนเป็น RESOLVED และใน Dynatrace มี Comment ล่าสุด ให้อัปเดต remark ใน DB ด้วย
             if dt_status == "RESOLVED" and latest_dt_comment:
                 update_payload["remark"] = latest_dt_comment
 
@@ -154,16 +153,24 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
         internal_id = item.get("internal_id")
         status_color = "🔴" if is_active_tab else "🟢"
 
+        # แท็ก Type
+        type_tag = f"[{item.get('type', 'Dynatrace')}]"
+        
+        # แท็ก ACK และ INC
         ack_prefix = f"[ACK: {item['ack']}] " if item.get('ack') else ""
         inc_prefix = f"[INC: {item['incident']}] " if item.get('incident') else ""
         
+        # แสดง Type ไว้หน้าสุด
         expander_title = (
-            f"{status_color} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
+            f"{status_color} {type_tag} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
             f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
         )
 
         with st.expander(expander_title, expanded=is_active_tab):
-            col_a, col_b, col_c, col_d = st.columns(4)
+            # แสดงรายละเอียดคอลัมน์
+            col_type, col_a, col_b, col_c, col_d = st.columns([1, 1.5, 2, 2, 2])
+            with col_type:
+                st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
             with col_a:
                 st.write(f"**Ack:** `{item['ack'] if item['ack'] else '-'}`")
                 st.write(f"**Status:** {item['status']}")
@@ -186,6 +193,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.markdown("---")
 
+            # --- โซนจัดการข้อมูล (Ack / Remark / Incident) ---
             st.markdown("🛠️ **จัดการข้อมูล Alert นี้:**")
             action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
 
