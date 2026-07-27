@@ -21,8 +21,8 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- ฟังก์ชันดึง Problems พร้อมเก็บ Debug Log ---
-def fetch_dynatrace_problems_debug():
+# --- 1. ดึง Problems จาก Dynatrace ---
+def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     
@@ -31,26 +31,21 @@ def fetch_dynatrace_problems_debug():
         "Content-Type": "application/json"
     }
     
-    # ทดลองยิงดึง Problems Endpoint พื้นฐาน
-    endpoint = f"{dt_url}/api/v2/problems?pageSize=20"
+    # ยิงดึงปัญหาล่าสุด 30 รายการ
+    endpoint = f"{dt_url}/api/v2/problems?pageSize=30"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=10)
-        return {
-            "url_used": endpoint,
-            "status_code": res.status_code,
-            "response_text": res.text,
-            "data": res.json() if res.status_code == 200 else {}
-        }
+        if res.status_code == 200:
+            return res.json().get("problems", [])
+        else:
+            st.error(f"❌ ดึงข้อมูลจาก Dynatrace ไม่สำเร็จ (Status Code: {res.status_code})")
+            return []
     except Exception as e:
-        return {
-            "url_used": endpoint,
-            "status_code": "ERROR",
-            "response_text": str(e),
-            "data": {}
-        }
+        st.error(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ Dynatrace: {str(e)}")
+        return []
 
-# --- ส่ง Comment เข้า Dynatrace ---
+# --- 2. ส่ง Comment เข้า Dynatrace ---
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -70,6 +65,7 @@ def post_comment_to_dynatrace(problem_id: str, comment_text: str):
         st.error(f"❌ Error sending comment: {str(e)}")
         return False
 
+# --- 3. คำนวณ Duration ---
 def calculate_duration(start_ms, end_ms):
     if not end_ms or end_ms == -1:
         now_ms = datetime.now().timestamp() * 1000
@@ -77,7 +73,7 @@ def calculate_duration(start_ms, end_ms):
         suffix = " (Active)"
     else:
         diff_sec = int((end_ms - start_ms) / 1000)
-        suffix = " (Resolved)"
+        suffix = " (Closed)"
 
     hours = diff_sec // 3600
     minutes = (diff_sec % 3600) // 60
@@ -85,6 +81,25 @@ def calculate_duration(start_ms, end_ms):
     if hours > 0:
         return f"{hours}h {minutes}m{suffix}"
     return f"{minutes}m{suffix}"
+
+# --- 4. Sync สถานะ CLOSED และ Comment ลง Supabase DB ---
+def sync_closed_status_to_db(supabase: Client, problems: list):
+    for prob in problems:
+        display_id = prob.get("displayId") or prob.get("problemId")
+        dt_status = prob.get("status")
+        start_ms = prob.get("startTime", 0)
+        end_ms = prob.get("endTime", -1)
+
+        # เช็กว่ามีอยู่ใน DB เราไหม
+        existing = supabase.table("alarm_comments").select("*").eq("problem_id", display_id).execute().data
+        
+        if existing:
+            duration_str = calculate_duration(start_ms, end_ms)
+            update_data = {
+                "status": dt_status,
+                "duration": duration_str
+            }
+            supabase.table("alarm_comments").update(update_data).eq("problem_id", display_id).execute()
 
 def run_app():
     st.title("🚨 Dynatrace Alarm Monitor & Comment Center")
@@ -102,51 +117,87 @@ def run_app():
         if st.button("🔄 อัปเดตข้อมูล Real-time", type="primary", use_container_width=True):
             st.rerun()
 
-    # --- ดึงข้อมูลเพื่อ Debug ---
-    with st.spinner("กำลังเชื่อมต่อ Dynatrace..."):
-        debug_res = fetch_dynatrace_problems_debug()
-
-    # แสดง Debug Box เพื่อดูว่า Dynatrace ตอบอะไรกลับมา
-    with st.expander("🛠️ คลิกเพื่อดูรายละเอียดการเชื่อมต่อ API (Debug Log)", expanded=True):
-        st.write(f"**URL ที่ยิงไป:** `{debug_res['url_used']}`")
-        st.write(f"**Status Code:** `{debug_res['status_code']}`")
-        st.code(debug_res['response_text'], language="json")
-
-    problems = debug_res['data'].get("problems", []) if debug_res['status_code'] == 200 else []
+    # --- ดึงข้อมูลจาก Dynatrace ---
+    with st.spinner("กำลังดึงข้อมูล Alarm ล่าสุดจาก Dynatrace..."):
+        problems = fetch_dynatrace_problems()
 
     if not problems:
-        st.info("💡 ไม่มีรายการ Alarm ส่งกลับมาจาก Dynatrace ตามการเชื่อมต่อข้างต้น")
+        st.success("✅ ไม่พบข้อมูล Alarm ในระบบขณะนี้")
         return
 
-    st.subheader(f"⚠️ รายการ Alarm ทั้งหมดที่พบ ({len(problems)} รายการ)")
+    # Sync สถานะ CLOSED ลง DB
+    sync_closed_status_to_db(supabase, problems)
 
-    for prob in problems:
+    # กรองเฉพาะรายการที่ยัง OPEN อยู่
+    open_problems = [p for p in problems if p.get("status") == "OPEN"]
+
+    st.subheader(f"⚠️ รายการ Alarm ที่กำลังเกิดขึ้น ({len(open_problems)} รายการ)")
+
+    if not open_problems:
+        st.success("✅ ไม่พบ Alarm สถานะ OPEN ในระบบขณะนี้ (รายการที่แก้ไขแล้ว/CLOSED ได้ถูกซิงค์ข้อมูลลง DB เรียบร้อยแล้ว)")
+        return
+
+    for prob in open_problems:
         internal_id = prob.get("problemId")
-        prob_id = prob.get("displayId") if prob.get("displayId") else f"P-{internal_id}"
+        prob_id = prob.get("displayId", f"P-{internal_id}")
         title = prob.get("title", "Unknown Problem")
-        status = prob.get("status", "UNKNOWN")
         severity = prob.get("severityLevel", "UNKNOWN")
         start_time_ms = prob.get("startTime", 0)
         end_time_ms = prob.get("endTime", -1)
         
+        # 1. วันเวลาเริ่ม (แปลง timestamp)
         start_dt_obj = datetime.fromtimestamp(start_time_ms / 1000.0, tz=TZ_TH) if start_time_ms else datetime.now(TZ_TH)
         start_date_str = start_dt_obj.strftime('%b %d %H:%M')
+
+        # 2. Duration
         duration_str = calculate_duration(start_time_ms, end_time_ms)
+
+        # 3. Management Zone (ดึงจากโครงสร้างจริง)
+        mz_list = [mz.get("name") for mz in prob.get("managementZones", [])] if prob.get("managementZones") else []
+        mz_str = ", ".join(mz_list) if mz_list else "Default"
+
+        # 4. Impacted Entity (ดึงจากโครงสร้างจริง)
+        impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
+        impacted_str = ", ".join(impacted_list) if impacted_list else "-"
+
+        # 5. Alerting Profiles
+        profile_list = [ap.get("name") for ap in prob.get("problemFilters", [])] if prob.get("problemFilters") else []
+        profile_str = ", ".join(profile_list) if profile_list else "Default"
 
         badge_color = "🔴" if severity in ["AVAILABILITY", "ERROR", "CRITICAL"] else "🟠"
 
-        with st.expander(f"{badge_color} **[{prob_id}]** {title} — Status: {status}", expanded=False):
-            st.write(f"**Problem ID:** `{prob_id}`")
-            st.write(f"**Status:** {status}")
-            st.write(f"**Start Date:** {start_date_str}")
-            st.write(f"**Duration:** {duration_str}")
-
+        with st.expander(f"{badge_color} **[{prob_id}]** {title} — (เริ่มเมื่อ: {start_date_str})", expanded=True):
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.write(f"**Problem ID:** `{prob_id}`")
+                st.write(f"**Problem Name:** {title}")
+                st.write(f"**Management Zone:** {mz_str}")
+                st.write(f"**Impacted Entity:** `{impacted_str}`")
+            with col_info2:
+                st.write(f"**Alerting Profile:** {profile_str}")
+                st.write(f"**Start Date:** {start_date_str}")
+                st.write(f"**Duration:** {duration_str}")
+            
+            # ลิงก์ตรงเปิดดูใน Dynatrace UI
             dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
             st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
 
             st.markdown("---")
+            
+            # --- แสดง History Comment จาก Supabase ---
+            st.markdown("💬 **ประวัติ Comment ในระบบ (Supabase History):**")
+            comments_res = supabase.table("alarm_comments").select("*").eq("problem_id", prob_id).order("id", desc=True).execute()
+            comments_data = comments_res.data
 
-            # ฟอร์มลง Comment
+            if comments_data:
+                for c in comments_data:
+                    c_time = datetime.fromisoformat(c['created_at']).astimezone(TZ_TH).strftime('%d-%m-%Y %H:%M')
+                    st.info(f"👤 **{c.get('user_name', 'Unknown')}** ({c_time}): {c.get('comment_text')}")
+            else:
+                st.caption("ยังไม่มี Comment สำหรับ Alarm นี้")
+
+            # --- ฟอร์มส่ง Comment ใหม่ ---
+            st.markdown("✏️ **เพิ่ม Comment ใหม่ (ส่งตรงเข้า Dynatrace & DB):**")
             with st.form(key=f"form_comment_{internal_id}", clear_on_submit=True):
                 col_a, col_b = st.columns([1, 2])
                 with col_a:
@@ -156,20 +207,28 @@ def run_app():
 
                 btn_submit = st.form_submit_button("🚀 ส่ง Comment เข้า Dynatrace & บันทึก DB")
 
-                if btn_submit and user_name and comment_input:
-                    dt_success = post_comment_to_dynatrace(internal_id, comment_input)
-                    if dt_success:
-                        db_payload = {
-                            "user_name": user_name,
-                            "problem_id": prob_id,
-                            "problem_name": title,
-                            "start_date": start_date_str,
-                            "duration": duration_str,
-                            "comment_text": comment_input,
-                            "status": status
-                        }
-                        supabase.table("alarm_comments").insert(db_payload).execute()
-                        st.success("✅ บันทึกข้อมูลเรียบร้อย!")
-                        st.rerun()
+                if btn_submit:
+                    if user_name and comment_input:
+                        dt_success = post_comment_to_dynatrace(internal_id, comment_input)
+                        
+                        if dt_success:
+                            db_payload = {
+                                "user_name": user_name,
+                                "problem_id": prob_id,               # เช่น P-26074757
+                                "management_zones": mz_str,           # เช่น COU_SEW_CSPOT_QA
+                                "problem_name": title,                # เช่น [ITO] High Disk Utilization > 90%
+                                "impacted_entity": impacted_str,      # เช่น csk8sdvqa02
+                                "alerting_profiles": profile_str,     # เช่น ITO_Dynatrace_Alert-Profile
+                                "start_date": start_date_str,         # เช่น Jul 27 ...
+                                "duration": duration_str,             # เช่น 1h 20m (Active)
+                                "comment_text": comment_input,
+                                "status": "OPEN"
+                            }
+                            supabase.table("alarm_comments").insert(db_payload).execute()
+                            
+                            st.success("✅ บันทึกข้อมูลลง DB และส่ง Comment เข้า Dynatrace เรียบร้อยแล้ว!")
+                            st.rerun()
+                        else:
+                            st.error("❌ ไม่สามารถส่ง Comment ไปยัง Dynatrace ได้")
                     else:
-                        st.error("❌ ส่ง Comment ไม่สำเร็จ")
+                        st.warning("⚠️ กรุณากรอกทั้งชื่อ User และข้อความ Comment ด้วยครับ")
