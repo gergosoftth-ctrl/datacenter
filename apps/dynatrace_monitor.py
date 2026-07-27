@@ -20,34 +20,22 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงข้อมูลแบบแยก OPEN และ RESOLVED ล่าสุด ---
+# --- 1. ดึงข้อมูลปัญหาย้อนหลัง 24 ชม. แบบไม่กรอง Selector ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    fields_query = "comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
-    all_problems = []
-
-    # 1.1 ดึงรายการที่ยัง OPEN อยู่ทั้งหมด (ไม่จำกัดเวลา)
-    endpoint_open = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&fields={fields_query}&pageSize=50"
+    # ยิงดึงย้อนหลัง 24 ชั่วโมงแบบไม่ใส่ Selector ให้ Dynatrace ส่งกลับมาทั้งหมด
+    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100"
+    
     try:
-        res_open = requests.get(endpoint_open, headers=headers, timeout=10)
-        if res_open.status_code == 200:
-            all_problems.extend(res_open.json().get("problems", []))
+        res = requests.get(endpoint, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json().get("problems", [])
+        return []
     except Exception:
-        pass
-
-    # 1.2 ดึงรายการที่ RESOLVED/CLOSED ย้อนหลัง 24 ชั่วโมง
-    endpoint_resolved = f"{dt_url}/api/v2/problems?problemSelector=status(\"RESOLVED\",\"CLOSED\")&from=-24h&fields={fields_query}&pageSize=50"
-    try:
-        res_resolved = requests.get(endpoint_resolved, headers=headers, timeout=10)
-        if res_resolved.status_code == 200:
-            all_problems.extend(res_resolved.json().get("problems", []))
-    except Exception:
-        pass
-
-    return all_problems
+        return []
 
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
     dt_url = get_dt_base_url()
@@ -86,28 +74,32 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 2. Sync และตรวจสอบสถานะกับ DB ---
+# --- 2. Sync และ Force Update สถานะลง Supabase DB ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
-    """ ดึง Alarm จาก Dynatrace เข้า Supabase และสั่ง Auto-Resolve รายการที่ไม่อยู่ใน Open List """
-    
-    # ดึง ID ของปัญหาทั้งหมดที่ Dynatrace แจ้งว่ายัง OPEN อยู่
     open_problem_ids = set()
     
     seen_ids = set()
     unique_problems = []
     for p in problems:
-        pid = p.get("displayId") or p.get("problemId")
-        if pid not in seen_ids:
-            seen_ids.add(pid)
+        display_id = p.get("displayId") or p.get("problemId")
+        internal_id = p.get("problemId")
+        
+        if display_id not in seen_ids:
+            seen_ids.add(display_id)
             unique_problems.append(p)
+            
+            # เก็บทั้ง displayId และ internal_id ไว้เช็กสถานะ OPEN
             if p.get("status") == "OPEN":
-                open_problem_ids.add(pid)
+                open_problem_ids.add(display_id)
+                open_problem_ids.add(internal_id)
 
     # 1. อัปเดตข้อมูลจาก API เข้า DB
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
-        raw_status = prob.get("status", "").upper()
+        raw_status = str(prob.get("status", "")).upper()
+        
+        # ถ้าระบบส่งเป็น CLOSED หรือ RESOLVED ให้ปรับเป็น RESOLVED
         dt_status = "ACTIVE" if raw_status == "OPEN" else "RESOLVED"
         
         start_ms = prob.get("startTime", 0)
@@ -150,6 +142,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             except Exception:
                 pass
         else:
+            # สั่ง FORCE UPDATE สถานะและเวลา Resolve ทันที
             update_payload = {
                 "status": dt_status,
                 "duration": duration_str,
@@ -162,16 +155,19 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
 
             supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
 
-    # 2. เช็ก DB ฝั่ง ACTIVE: หากรายการไหนใน DB ไม่อยู่ใน open_problem_ids ของ Dynatrace แล้ว ให้สั่งเปลี่ยนเป็น RESOLVED ทันที
-    active_in_db = supabase.table("alarm_comments").select("problem_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
+    # 2. กวาดเช็ก DB: เคสไหนใน DB ที่ไม่อยู่ในรายการ OPEN ของ Dynatrace แล้ว ให้ปรับเป็น RESOLVED ทันที
+    active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
     for db_item in active_in_db:
-        db_pid = db_item.get("problem_id")
-        if db_pid not in open_problem_ids:
+        p_id = db_item.get("problem_id")
+        i_id = db_item.get("internal_id")
+        
+        # ถ้าไม่มีทั้งใน Display ID และ Internal ID แสดงว่าปิดไปแล้วแน่นอน
+        if p_id not in open_problem_ids and i_id not in open_problem_ids:
             now_str = datetime.now(TZ_TH).strftime('%b %d %H:%M')
             supabase.table("alarm_comments").update({
                 "status": "RESOLVED",
                 "resolve_date": now_str
-            }).eq("problem_id", db_pid).execute()
+            }).eq("problem_id", p_id).execute()
 
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
