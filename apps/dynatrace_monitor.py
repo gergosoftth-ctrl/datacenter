@@ -60,8 +60,18 @@ def calculate_duration(start_ms, end_ms):
     return f"{hours}h {minutes}m{suffix}" if hours > 0 else f"{minutes}m{suffix}"
 
 def sync_dynatrace_to_db(supabase: Client, problems: list):
-    """ ดึง Alarm จาก Dynatrace เข้า Supabase ถ้ายังไม่มีใน DB """
-    for prob in problems:
+    """ ดึง Alarm จาก Dynatrace เข้า Supabase โดยกรองรายการซ้ำให้อัตโนมัติ """
+    # 1. กรองปัญหากลุ่มเดียวกันใน Dynatrace ไม่ให้ประมวลผลซ้ำ
+    seen_ids = set()
+    unique_problems = []
+    for p in problems:
+        pid = p.get("displayId") or p.get("problemId")
+        if pid not in seen_ids:
+            seen_ids.add(pid)
+            unique_problems.append(p)
+
+    # 2. นำรายการเข้า Database
+    for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
         dt_status = "ACTIVE" if prob.get("status") == "OPEN" else "RESOLVED"
@@ -77,10 +87,11 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         services_str = ", ".join(mz_list) if mz_list else "Default"
         title = prob.get("title", "Unknown Problem")
 
-        # เช็กว่ามีใน DB แล้วหรือยัง
-        existing = supabase.table("alarm_comments").select("*").eq("problem_id", display_id).execute().data
+        # เช็กกับ Supabase DB ว่ามี Problem ID นี้อยู่แล้วหรือยัง
+        existing = supabase.table("alarm_comments").select("id").eq("problem_id", display_id).execute().data
 
         if not existing:
+            # ถ้ายังไม่มีใน DB ให้ทำการ Insert ใหม่เพียงครั้งเดียว
             db_payload = {
                 "problem_id": display_id,
                 "internal_id": internal_id,
@@ -94,9 +105,12 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 "remark": None,
                 "incident": None
             }
-            supabase.table("alarm_comments").insert(db_payload).execute()
+            try:
+                supabase.table("alarm_comments").insert(db_payload).execute()
+            except Exception:
+                pass
         else:
-            # ถ้ามีแล้ว อัปเดตสถานะ + duration + resolve_date
+            # ถ้ามีอยู่แล้ว ให้ทำเฉพาะการ Update สถานะ + Duration
             update_payload = {
                 "status": dt_status,
                 "duration": duration_str,
