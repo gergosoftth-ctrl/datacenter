@@ -145,10 +145,17 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
         internal_id = item.get("internal_id")
         status_color = "🔴" if is_active_tab else "🟢"
 
-        with st.expander(
-            f"{status_color} **[{prob_id}]** {item['problem_name']} | Impact: {item.get('impact', '-')}",
-            expanded=is_active_tab
-        ):
+        # --- สร้าง Prefix สำหรับใส่ใน Title Expander ---
+        ack_prefix = f"[ACK: {item['ack']}] " if item.get('ack') else ""
+        inc_prefix = f"[INC: {item['incident']}] " if item.get('incident') else ""
+        
+        # ปรับรูปแบบ Title ใหม่ให้โชว์ ACK และ INC ในหัวข้อ
+        expander_title = (
+            f"{status_color} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
+            f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
+        )
+
+        with st.expander(expander_title, expanded=is_active_tab):
             # แสดงข้อมูลหลักเรียงตามลำดับ
             col_a, col_b, col_c, col_d = st.columns(4)
             with col_a:
@@ -164,7 +171,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 st.write(f"**Resolve Date:** {item['resolve_date'] if item['resolve_date'] else '-'}")
                 st.write(f"**Incident:** `{item['incident'] if item['incident'] else '-'}`")
 
-            # แสดง Impact อยู่ขั้นกลางระหว่าง Problem กับ Remark
+            # แสดง Impact และ Remark
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             st.write(f"**Remark (Dynatrace Comment):** {item['remark'] if item['remark'] else '-'}")
             
