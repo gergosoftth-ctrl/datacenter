@@ -1,8 +1,10 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
+import threading
+import time
 from supabase import create_client, Client
 from streamlit_autorefresh import st_autorefresh
 
@@ -21,13 +23,12 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงข้อมูลสดจาก Dynatrace API (ใส่ fields ครบถ้วน) ---
+# --- 1. ฟังก์ชันดึง Dynatrace API ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # ดึงข้อมูลย้อนหลัง 24 ชม. พร้อมรายละเอียด ManagementZone และ ImpactedEntity
     endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
     
     try:
@@ -35,7 +36,6 @@ def fetch_dynatrace_problems():
         if res.status_code == 200:
             return res.json().get("problems", [])
         
-        # Fallback กรณี Query ยาวแล้ว API คืนค่า Error ให้ลองยิงแบบสั้น
         fallback_endpoint = f"{dt_url}/api/v2/problems?pageSize=50"
         res_fb = requests.get(fallback_endpoint, headers=headers, timeout=10)
         if res_fb.status_code == 200:
@@ -44,7 +44,6 @@ def fetch_dynatrace_problems():
     except Exception:
         return []
 
-# --- 2. ยิง Comment กลับไปหา Dynatrace ---
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -82,8 +81,9 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 3. บันทึก/อัปเดตข้อมูลจาก Dynatrace ลง Supabase DB ---
-def sync_dynatrace_to_db(supabase: Client, problems: list):
+# --- 2. Sync Logic (Dynatrace -> Supabase DB) ---
+def sync_dynatrace_to_db(supabase: Client):
+    problems = fetch_dynatrace_problems()
     if not problems:
         return
 
@@ -103,7 +103,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 open_problem_ids.add(display_id)
                 open_problem_ids.add(internal_id)
 
-    # 3.1 บันทึกรายการใหม่ หรือ อัปเดตรายการเดิมใน DB
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
@@ -164,7 +163,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-    # 3.2 เคลียร์เคสค้างใน DB ที่ Dynatrace ปิดไปแล้ว
     try:
         active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
         for db_item in active_in_db:
@@ -180,7 +178,23 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
     except Exception:
         pass
 
-# --- 4. แสดงผลรายการบน Dashboard ---
+# --- 3. Background Thread Sync (ทำงานตลอดเวลาเบื้องหลัง) ---
+@st.cache_resource
+def start_background_sync():
+    """ สร้าง Thread แยกให้แอบยิง Sync API เบื้องหลังทุกๆ 15 วินาทีตลอดเวลา """
+    def sync_loop():
+        supabase = init_supabase()
+        while True:
+            try:
+                sync_dynatrace_to_db(supabase)
+            except Exception:
+                pass
+            time.sleep(15)  # ทำงานทุก 15 วินาที
+
+    thread = threading.Thread(target=sync_loop, daemon=True)
+    thread.start()
+
+# --- 4. Render UI บน Streamlit ---
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
         status_label = "ACTIVE" if is_active_tab else "RESOLVED"
@@ -228,11 +242,9 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.markdown("---")
 
-            # --- โซนแก้ไขข้อมูลบน Dashboard ---
             st.markdown("🛠️ **แก้ไขข้อมูลบน Dashboard (อัปเดตลง DB & Dynatrace):**")
             action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
 
-            # 1. ACK -> อัปเดต DB
             with action_col1:
                 st.write("**1. Acknowledge**")
                 if not item['ack']:
@@ -246,7 +258,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
-            # 2. Remark -> อัปเดต DB & ยิงไป Dynatrace
             with action_col2:
                 st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
                 with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
@@ -263,7 +274,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         except Exception as e:
                             st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
 
-            # 3. Incident -> อัปเดต DB
             with action_col3:
                 st.write("**3. Incident Number (อัปเดต DB)**")
                 with st.form(key=f"form_incident_{db_id}", clear_on_submit=True):
@@ -278,17 +288,12 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         except Exception as e:
                             st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
 
-# --- 5. ฟังก์ชันหลักสำหรับรันแอป (วางไว้ล่างสุด) ---
+# --- 5. Main App ---
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
     
-    # Auto-refresh หน้าจอทุกๆ 10 วินาที
-    refresh_count = st_autorefresh(interval=10000, key="dt_dashboard_autorefresh")
-    now_time_str = datetime.now(TZ_TH).strftime('%H:%M:%S')
-    
-    col_info, col_btn = st.columns([3, 1])
-    with col_info:
-        st.caption(f"⚡ **Dynatrace Live Sync Active** | อัปเดตล่าสุดเมื่อ: `{now_time_str}` (รอบที่ {refresh_count})")
+    # 🎯 เริ่ม Background Worker ตั้งแต่รันแอปครั้งแรก
+    start_background_sync()
 
     try:
         supabase = init_supabase()
@@ -296,27 +301,33 @@ def run_app():
         st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
         return
 
-    # STEP 1: ดึงข้อมูลสดตรงจาก Dynatrace API
-    dt_problems = fetch_dynatrace_problems()
+    # ปุ่ม Manual Sync ตัวช่วยกดดึงทันที
+    col_info, col_btn = st.columns([3, 1])
+    with col_btn:
+        if st.button("⚡ Force Sync Now", type="primary", use_container_width=True):
+            with st.spinner("กำลัง Sync สดจาก Dynatrace..."):
+                sync_dynatrace_to_db(supabase)
+                st.rerun()
 
-    # STEP 2: ส่งข้อมูลจาก Dynatrace ไปบันทึก/อัปเดตลง Supabase DB
-    if dt_problems:
-        sync_dynatrace_to_db(supabase, dt_problems)
+    # Auto Refresh หน้าจอ UI จาก DB ทุกๆ 5 วินาที
+    refresh_count = st_autorefresh(interval=5000, key="db_ui_reader")
+    now_time_str = datetime.now(TZ_TH).strftime('%H:%M:%S')
+    
+    with col_info:
+        st.caption(f"🤖 **Background Auto-Sync Active** | อ่าน DB ล่าสุดเมื่อ: `{now_time_str}` (รอบที่ {refresh_count})")
 
-    # STEP 3: ดึงข้อมูลจาก DB มาแสดงผลบน Dashboard (รวมข้อมูล Ack, Incident, Remark ที่เคยแก้ไขไว้)
+    # ดึงค่าจาก Supabase DB ตรงๆ มาโชว์
     try:
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
         raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
         
-        # กรองรายการ Resolved (ถ้าไม่มีเงื่อนไขเวลา ให้แสดงผลทั้งหมดเพื่อไม่ให้ตกหล่น)
         resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
         if not resolved_res and raw_resolved:
-            resolved_res = raw_resolved[:20]  # Fallback: ถ้าเช็กเวลาไม่ติด ให้ดึง 20 รายการล่าสุดมาโชว์แทน
+            resolved_res = raw_resolved[:20]
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
         return
 
-    # STEP 4: Render UI
     tab_active, tab_resolved = st.tabs([
         f"🔴 Active Alarms ({len(active_res)})", 
         f"🟢 Resolved History ({len(resolved_res)})"
