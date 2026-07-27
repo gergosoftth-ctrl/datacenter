@@ -239,11 +239,13 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
-            with action_col2:
-                st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
-                with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
-                    new_remark = st.text_input("กรอก Remark / Comment:", key=f"input_remark_{db_id}")
-                    btn_remark = st.form_submit_button("🚀 บันทึก Remark")
+            # 2. Remark -> อัปเดต DB & ยิงไป Dynatrace
+with action_col2:
+    st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
+    with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
+        # 🎯 เปลี่ยนเป็น st.text_area และกำหนด height ให้เหมาะสม
+        new_remark = st.text_area("กรอก Remark / Comment (กด Enter ขึ้นบรรทัดใหม่ได้):", key=f"input_remark_{db_id}", height=100)
+        btn_remark = st.form_submit_button("🚀 บันทึก Remark")
 
                     if btn_remark and new_remark:
                         try:
