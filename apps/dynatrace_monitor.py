@@ -196,6 +196,25 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         st.success("บันทึก Incident ลง DB สำเร็จ!")
                         st.rerun()
 
+# --- ฟังก์ชันช่วยเช็กว่า Start Date ย้อนหลังไม่เกิน 1 ชั่วโมงหรือไม่ ---
+def is_within_last_1_hour(start_date_str: str) -> bool:
+    if not start_date_str or start_date_str == "-":
+        return False
+    try:
+        now_th = datetime.now(TZ_TH)
+        # แปลงข้อความสตริง เช่น 'Jul 27 18:02' ให้เป็น datetime object
+        dt_obj = datetime.strptime(start_date_str, '%b %d %H:%M')
+        # เติมปีปัจจุบันเข้าไป
+        dt_obj = dt_obj.replace(year=now_th.year, tzinfo=TZ_TH)
+        
+        # ถ้าระยะห่างเวลาน้อยกว่าหรือเท่ากับ 1 ชั่วโมง (3600 วินาที) ให้คืนค่า True
+        diff = now_th - dt_obj
+        return 0 <= diff.total_seconds() <= 3600
+    except Exception:
+        return True # หากแปลงฟอร์แมตไม่ได้ ให้แสดงไว้ก่อนเพื่อความปลอดภัย
+
+# ... [ฟังก์ชันอื่นๆ คงเดิม] ...
+
 def run_app():
     st.title("🚨 Alarm Management Center")
     st.caption("ตารางติดตามสถานะการแจ้งเตือนรองรับ Multi-Source Monitoring")
@@ -218,14 +237,17 @@ def run_app():
         if dt_problems:
             sync_dynatrace_to_db(supabase, dt_problems)
 
-    # ดึงข้อมูลแยกตาม Status จาก DB
+    # 1. ดึงรายการ ACTIVE ทั้งหมด
     active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
-    resolved_res = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+    
+    # 2. ดึงรายการ RESOLVED ทั้งหมด แล้วกรองเฉพาะรายการที่ Start Date ย้อนหลังไม่เกิน 1 ชั่วโมง
+    raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+    resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
 
-    # --- สร้าง แท็บแยก Active / Resolve ---
+    # --- สร้าง แท็บแยก Active / Resolve (จำกัด 1 ชม.) ---
     tab_active, tab_resolved = st.tabs([
         f"🔴 Active Alarms ({len(active_res)})", 
-        f"🟢 Resolved History ({len(resolved_res)})"
+        f"🟢 Resolved History - ล่าสุด 1 ชม. ({len(resolved_res)})"
     ])
 
     with tab_active:
@@ -233,5 +255,5 @@ def run_app():
         render_alarm_list(supabase, active_res, is_active_tab=True)
 
     with tab_resolved:
-        st.subheader("✅ ประวัติ Alarm ที่แก้ไขเรียบร้อยแล้ว (Resolved)")
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (นับเฉพาะ Start Date ย้อนหลังไม่เกิน 1 ชั่วโมง)")
         render_alarm_list(supabase, resolved_res, is_active_tab=False)
