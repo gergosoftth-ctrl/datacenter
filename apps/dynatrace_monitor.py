@@ -21,34 +21,70 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงข้อมูลตรงจาก Dynatrace API ---
+# --- 1. ปรับฟังก์ชันดึง Dynatrace API ให้เรียบง่ายและเสถียรที่สุด ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
+    # ดึงปัญหารายการล่าสุด 50 รายการโดยไม่ใส่ Query ซับซ้อน
+    endpoint = f"{dt_url}/api/v2/problems?pageSize=50"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=10)
         if res.status_code == 200:
             return res.json().get("problems", [])
         return []
-    except Exception:
+    except Exception as e:
         return []
 
-# --- 2. ยิง Comment กลับไปหา Dynatrace ---
-def post_comment_to_dynatrace(problem_id: str, comment_text: str):
-    dt_url = get_dt_base_url()
-    token = st.secrets["dynatrace"]["API_TOKEN"]
-    headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
-    endpoint = f"{dt_url}/api/v2/problems/{problem_id}/comments"
+# --- 2. อัปเดตฟังก์ชัน run_app ให้มี Fallback แสดงผลจาก DB เสมอ ---
+def run_app():
+    st.title("🚨 Real-time Alarm Management Center")
     
+    # Auto-refresh หน้าจอทุกๆ 10 วินาที
+    refresh_count = st_autorefresh(interval=10000, key="dt_dashboard_autorefresh")
+    now_time_str = datetime.now(TZ_TH).strftime('%H:%M:%S')
+    
+    col_info, col_btn = st.columns([3, 1])
+    with col_info:
+        st.caption(f"⚡ **Dynatrace Live Sync Active** | อัปเดตล่าสุดเมื่อ: `{now_time_str}` (รอบที่ {refresh_count})")
+
     try:
-        res = requests.post(endpoint, headers=headers, json={"message": comment_text}, timeout=5)
-        return res.status_code in [200, 201]
+        supabase = init_supabase()
     except Exception:
-        return False
+        st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
+        return
+
+    # STEP 1: ดึงข้อมูลสดตรงจาก Dynatrace API
+    dt_problems = fetch_dynatrace_problems()
+
+    # STEP 2: ส่งข้อมูลจาก Dynatrace ไปบันทึก/อัปเดตลง Supabase DB (ถ้ามีข้อมูล)
+    if dt_problems:
+        sync_dynatrace_to_db(supabase, dt_problems)
+
+    # STEP 3: ดึงข้อมูลจาก DB มาแสดงผลเสมอ (ไม่ว่า API จะส่งข้อมูลมาหรือไม่)
+    try:
+        active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
+        raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+        resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
+        return
+
+    # STEP 4: Render UI
+    tab_active, tab_resolved = st.tabs([
+        f"🔴 Active Alarms ({len(active_res)})", 
+        f"🟢 Resolved History - ล่าสุด 1 ชม. ({len(resolved_res)})"
+    ])
+
+    with tab_active:
+        st.subheader("⚠️ รายการ Alarm ที่กำลังเกิดขึ้น (Active)")
+        render_alarm_list(supabase, active_res, is_active_tab=True)
+
+    with tab_resolved:
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (นับเฉพาะ Start Date ย้อนหลังไม่เกิน 1 ชั่วโมง)")
+        render_alarm_list(supabase, resolved_res, is_active_tab=False)
 
 def calculate_duration(start_ms, end_ms):
     if not end_ms or end_ms == -1:
