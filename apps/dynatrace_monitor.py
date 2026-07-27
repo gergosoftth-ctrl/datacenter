@@ -20,21 +20,21 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงข้อมูลปัญหาย้อนหลัง 24 ชม. แบบไม่กรอง Selector ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # ยิงดึงย้อนหลัง 24 ชั่วโมงแบบไม่ใส่ Selector ให้ Dynatrace ส่งกลับมาทั้งหมด
-    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100"
+    # ยิงดึงข้อมูลย้อนหลัง 24 ชั่วโมงเพื่อกวาดมาทั้ง OPEN, RESOLVED, CLOSED
+    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
     
     try:
-        res = requests.get(endpoint, headers=headers, timeout=10)
+        res = requests.get(endpoint, headers=headers, timeout=15)
         if res.status_code == 200:
             return res.json().get("problems", [])
         return []
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
@@ -74,12 +74,15 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 2. Sync และ Force Update สถานะลง Supabase DB ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
+    """ Sync ข้อมูล Dynatrace ลง DB และจัดการ Connection Error แบบปลอดภัย """
+    if not problems:
+        return
+
     open_problem_ids = set()
-    
     seen_ids = set()
     unique_problems = []
+
     for p in problems:
         display_id = p.get("displayId") or p.get("problemId")
         internal_id = p.get("problemId")
@@ -88,18 +91,17 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             seen_ids.add(display_id)
             unique_problems.append(p)
             
-            # เก็บทั้ง displayId และ internal_id ไว้เช็กสถานะ OPEN
-            if p.get("status") == "OPEN":
+            # เก็บ ID ที่สถานะยังเป็น OPEN ไว้ตรวจสอบ
+            if str(p.get("status", "")).upper() == "OPEN":
                 open_problem_ids.add(display_id)
                 open_problem_ids.add(internal_id)
 
-    # 1. อัปเดตข้อมูลจาก API เข้า DB
+    # 1. อัปเดต/เพิ่ม ข้อมูลจาก Dynatrace
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
         raw_status = str(prob.get("status", "")).upper()
         
-        # ถ้าระบบส่งเป็น CLOSED หรือ RESOLVED ให้ปรับเป็น RESOLVED
         dt_status = "ACTIVE" if raw_status == "OPEN" else "RESOLVED"
         
         start_ms = prob.get("startTime", 0)
@@ -119,55 +121,57 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         dt_comments = prob.get("comments", [])
         latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
 
-        existing = supabase.table("alarm_comments").select("id, status").eq("problem_id", display_id).execute().data
+        try:
+            existing = supabase.table("alarm_comments").select("id, status").eq("problem_id", display_id).execute().data
 
-        if not existing:
-            db_payload = {
-                "type": "Dynatrace",
-                "problem_id": display_id,
-                "internal_id": internal_id,
-                "status": dt_status,
-                "services": services_str,
-                "problem_name": title,
-                "impact": impact_str,
-                "start_date": start_dt_str,
-                "duration": duration_str,
-                "resolve_date": resolve_dt_str if end_ms > 0 else None,
-                "ack": None,
-                "remark": latest_dt_comment,
-                "incident": None
-            }
-            try:
+            if not existing:
+                db_payload = {
+                    "type": "Dynatrace",
+                    "problem_id": display_id,
+                    "internal_id": internal_id,
+                    "status": dt_status,
+                    "services": services_str,
+                    "problem_name": title,
+                    "impact": impact_str,
+                    "start_date": start_dt_str,
+                    "duration": duration_str,
+                    "resolve_date": resolve_dt_str if end_ms > 0 else None,
+                    "ack": None,
+                    "remark": latest_dt_comment,
+                    "incident": None
+                }
                 supabase.table("alarm_comments").insert(db_payload).execute()
-            except Exception:
-                pass
-        else:
-            # สั่ง FORCE UPDATE สถานะและเวลา Resolve ทันที
-            update_payload = {
-                "status": dt_status,
-                "duration": duration_str,
-                "impact": impact_str
-            }
-            if end_ms > 0:
-                update_payload["resolve_date"] = resolve_dt_str
-            if dt_status == "RESOLVED" and latest_dt_comment:
-                update_payload["remark"] = latest_dt_comment
+            else:
+                update_payload = {
+                    "status": dt_status,
+                    "duration": duration_str,
+                    "impact": impact_str
+                }
+                if end_ms > 0:
+                    update_payload["resolve_date"] = resolve_dt_str
+                if dt_status == "RESOLVED" and latest_dt_comment:
+                    update_payload["remark"] = latest_dt_comment
 
-            supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
+                supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
+        except Exception as e:
+            # ครอบ try-except ป้องกัน ReadError/Timeout ไม่ให้แอป crash
+            continue
 
-    # 2. กวาดเช็ก DB: เคสไหนใน DB ที่ไม่อยู่ในรายการ OPEN ของ Dynatrace แล้ว ให้ปรับเป็น RESOLVED ทันที
-    active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
-    for db_item in active_in_db:
-        p_id = db_item.get("problem_id")
-        i_id = db_item.get("internal_id")
-        
-        # ถ้าไม่มีทั้งใน Display ID และ Internal ID แสดงว่าปิดไปแล้วแน่นอน
-        if p_id not in open_problem_ids and i_id not in open_problem_ids:
-            now_str = datetime.now(TZ_TH).strftime('%b %d %H:%M')
-            supabase.table("alarm_comments").update({
-                "status": "RESOLVED",
-                "resolve_date": now_str
-            }).eq("problem_id", p_id).execute()
+    # 2. กวาดล้างเคสใน DB ที่ปิดแล้ว แต่ยังค้าง ACTIVE
+    try:
+        active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
+        for db_item in active_in_db:
+            p_id = db_item.get("problem_id")
+            i_id = db_item.get("internal_id")
+            
+            if p_id not in open_problem_ids and i_id not in open_problem_ids:
+                now_str = datetime.now(TZ_TH).strftime('%b %d %H:%M')
+                supabase.table("alarm_comments").update({
+                    "status": "RESOLVED",
+                    "resolve_date": now_str
+                }).eq("problem_id", p_id).execute()
+    except Exception:
+        pass
 
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
@@ -181,22 +185,16 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
         internal_id = item.get("internal_id")
         status_color = "🔴" if is_active_tab else "🟢"
 
-        # แท็ก Type
         type_tag = f"[{item.get('type', 'Dynatrace')}]"
-        
-        # แท็ก ACK และ INC
         ack_prefix = f"[ACK: {item['ack']}] " if item.get('ack') else ""
         inc_prefix = f"[INC: {item['incident']}] " if item.get('incident') else ""
         
-        # แสดง Type ไว้หน้าสุด
         expander_title = (
             f"{status_color} {type_tag} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
             f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
         )
 
-        # 🎯 ปรับตรงนี้ให้ expanded=False (หุบไว้ก่อนเสมอนั่นเองครับ)
         with st.expander(expander_title, expanded=False):
-            # แสดงรายละเอียดคอลัมน์
             col_type, col_a, col_b, col_c, col_d = st.columns([1, 1.5, 2, 2, 2])
             with col_type:
                 st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
@@ -222,7 +220,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.markdown("---")
 
-            # --- โซนจัดการข้อมูล (Ack / Remark / Incident) ---
             st.markdown("🛠️ **จัดการข้อมูล Alert นี้:**")
             action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
 
@@ -230,9 +227,12 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 st.write("**1. Acknowledge**")
                 if not item['ack']:
                     if st.button("✅ ACK Alert", key=f"btn_ack_{db_id}", use_container_width=True):
-                        supabase.table("alarm_comments").update({"ack": "Test"}).eq("id", db_id).execute()
-                        st.success("บันทึก Ack: Test เรียบร้อย!")
-                        st.rerun()
+                        try:
+                            supabase.table("alarm_comments").update({"ack": "Test"}).eq("id", db_id).execute()
+                            st.success("บันทึก Ack: Test เรียบร้อย!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"เกิดข้อผิดพลาดในการ Ack: {str(e)}")
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
@@ -245,9 +245,12 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                     if btn_remark and new_remark:
                         dt_ok = post_comment_to_dynatrace(internal_id, new_remark) if internal_id else True
                         if dt_ok:
-                            supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
-                            st.success("บันทึก Remark สำเร็จ!")
-                            st.rerun()
+                            try:
+                                supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
+                                st.success("บันทึก Remark สำเร็จ!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
                         else:
                             st.error("❌ ไม่สามารถส่ง Remark ไปยัง Dynatrace ได้")
 
@@ -258,9 +261,12 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                     btn_inc = st.form_submit_button("💾 บันทึก Incident")
 
                     if btn_inc and new_inc:
-                        supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
-                        st.success("บันทึก Incident ลง DB สำเร็จ!")
-                        st.rerun()
+                        try:
+                            supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
+                            st.success("บันทึก Incident ลง DB สำเร็จ!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
 
 def run_app():
     st.title("🚨 Alarm Management Center")
@@ -279,13 +285,16 @@ def run_app():
 
     with st.spinner("กำลังอัปเดตข้อมูล Alarm จาก Dynatrace..."):
         dt_problems = fetch_dynatrace_problems()
-        if dt_problems:
-            sync_dynatrace_to_db(supabase, dt_problems)
+        sync_dynatrace_to_db(supabase, dt_problems)
 
-    active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
-    
-    raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
-    resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
+    # ดึงข้อมูลมาแสดงผลแบบปลอดภัย
+    try:
+        active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
+        raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+        resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
+        return
 
     tab_active, tab_resolved = st.tabs([
         f"🔴 Active Alarms ({len(active_res)})", 
