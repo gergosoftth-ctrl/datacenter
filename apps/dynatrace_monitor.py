@@ -166,7 +166,8 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
         )
 
-        with st.expander(expander_title, expanded=is_active_tab):
+        # 🎯 ปรับตรงนี้ให้ expanded=False (หุบไว้ก่อนเสมอนั่นเองครับ)
+        with st.expander(expander_title, expanded=False):
             # แสดงรายละเอียดคอลัมน์
             col_type, col_a, col_b, col_c, col_d = st.columns([1, 1.5, 2, 2, 2])
             with col_type:
