@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from supabase import create_client, Client
 
@@ -59,6 +59,18 @@ def calculate_duration(start_ms, end_ms):
     minutes = (diff_sec % 3600) // 60
     return f"{hours}h {minutes}m{suffix}" if hours > 0 else f"{minutes}m{suffix}"
 
+def is_within_last_1_hour(start_date_str: str) -> bool:
+    if not start_date_str or start_date_str == "-":
+        return False
+    try:
+        now_th = datetime.now(TZ_TH)
+        dt_obj = datetime.strptime(start_date_str, '%b %d %H:%M')
+        dt_obj = dt_obj.replace(year=now_th.year, tzinfo=TZ_TH)
+        diff = now_th - dt_obj
+        return 0 <= diff.total_seconds() <= 3600
+    except Exception:
+        return True
+
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     """ ดึง Alarm จาก Dynatrace เข้า Supabase โดยกรองรายการซ้ำให้อัตโนมัติ """
     seen_ids = set()
@@ -81,9 +93,14 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         resolve_dt_str = datetime.fromtimestamp(end_ms / 1000.0, tz=TZ_TH).strftime('%b %d %H:%M') if end_ms > 0 else "-"
         duration_str = calculate_duration(start_ms, end_ms)
 
+        # Management Zones -> Services
         mz_list = [mz.get("name") for mz in prob.get("managementZones", [])] if prob.get("managementZones") else []
         services_str = ", ".join(mz_list) if mz_list else "Default"
         title = prob.get("title", "Unknown Problem")
+
+        # Impacted Entities -> Impact
+        impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
+        impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
         existing = supabase.table("alarm_comments").select("id").eq("problem_id", display_id).execute().data
 
@@ -94,6 +111,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 "status": dt_status,
                 "services": services_str,
                 "problem_name": title,
+                "impact": impact_str,
                 "start_date": start_dt_str,
                 "duration": duration_str,
                 "resolve_date": resolve_dt_str if end_ms > 0 else None,
@@ -109,6 +127,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             update_payload = {
                 "status": dt_status,
                 "duration": duration_str,
+                "impact": impact_str,
                 "resolve_date": resolve_dt_str if end_ms > 0 else None
             }
             supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
@@ -127,10 +146,10 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
         status_color = "🔴" if is_active_tab else "🟢"
 
         with st.expander(
-            f"{status_color} **[{prob_id}]** {item['problem_name']} | Service: {item['services']}",
+            f"{status_color} **[{prob_id}]** {item['problem_name']} | Impact: {item.get('impact', '-')}",
             expanded=is_active_tab
         ):
-            # แสดงข้อมูลหลัก
+            # แสดงข้อมูลหลักเรียงตามลำดับ
             col_a, col_b, col_c, col_d = st.columns(4)
             with col_a:
                 st.write(f"**Ack:** `{item['ack'] if item['ack'] else '-'}`")
@@ -145,6 +164,8 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 st.write(f"**Resolve Date:** {item['resolve_date'] if item['resolve_date'] else '-'}")
                 st.write(f"**Incident:** `{item['incident'] if item['incident'] else '-'}`")
 
+            # แสดง Impact อยู่ขั้นกลางระหว่าง Problem กับ Remark
+            st.write(f"**Impact:** `{item.get('impact', '-')}`")
             st.write(f"**Remark (Dynatrace Comment):** {item['remark'] if item['remark'] else '-'}")
             
             if internal_id:
@@ -168,7 +189,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
-            # 2. ฟอร์ม Remark (ส่ง Dynatrace + DB)
+            # 2. ฟอร์ม Remark
             with action_col2:
                 st.write("**2. Remark (ส่งเข้า Dynatrace)**")
                 with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
@@ -184,7 +205,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         else:
                             st.error("❌ ไม่สามารถส่ง Remark ไปยัง Dynatrace ได้")
 
-            # 3. ฟอร์ม Incident (ลง DB เท่านั้น)
+            # 3. ฟอร์ม Incident
             with action_col3:
                 st.write("**3. Incident Number (ลง DB เท่านั้น)**")
                 with st.form(key=f"form_incident_{db_id}", clear_on_submit=True):
@@ -195,25 +216,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
                         st.success("บันทึก Incident ลง DB สำเร็จ!")
                         st.rerun()
-
-# --- ฟังก์ชันช่วยเช็กว่า Start Date ย้อนหลังไม่เกิน 1 ชั่วโมงหรือไม่ ---
-def is_within_last_1_hour(start_date_str: str) -> bool:
-    if not start_date_str or start_date_str == "-":
-        return False
-    try:
-        now_th = datetime.now(TZ_TH)
-        # แปลงข้อความสตริง เช่น 'Jul 27 18:02' ให้เป็น datetime object
-        dt_obj = datetime.strptime(start_date_str, '%b %d %H:%M')
-        # เติมปีปัจจุบันเข้าไป
-        dt_obj = dt_obj.replace(year=now_th.year, tzinfo=TZ_TH)
-        
-        # ถ้าระยะห่างเวลาน้อยกว่าหรือเท่ากับ 1 ชั่วโมง (3600 วินาที) ให้คืนค่า True
-        diff = now_th - dt_obj
-        return 0 <= diff.total_seconds() <= 3600
-    except Exception:
-        return True # หากแปลงฟอร์แมตไม่ได้ ให้แสดงไว้ก่อนเพื่อความปลอดภัย
-
-# ... [ฟังก์ชันอื่นๆ คงเดิม] ...
 
 def run_app():
     st.title("🚨 Alarm Management Center")
@@ -237,14 +239,13 @@ def run_app():
         if dt_problems:
             sync_dynatrace_to_db(supabase, dt_problems)
 
-    # 1. ดึงรายการ ACTIVE ทั้งหมด
+    # ดึงข้อมูลแยกตาม Status จาก DB
     active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
     
-    # 2. ดึงรายการ RESOLVED ทั้งหมด แล้วกรองเฉพาะรายการที่ Start Date ย้อนหลังไม่เกิน 1 ชั่วโมง
     raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
     resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
 
-    # --- สร้าง แท็บแยก Active / Resolve (จำกัด 1 ชม.) ---
+    # --- สร้าง แท็บแยก Active / Resolve ---
     tab_active, tab_resolved = st.tabs([
         f"🔴 Active Alarms ({len(active_res)})", 
         f"🟢 Resolved History - ล่าสุด 1 ชม. ({len(resolved_res)})"
