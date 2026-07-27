@@ -61,7 +61,6 @@ def calculate_duration(start_ms, end_ms):
 
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     """ ดึง Alarm จาก Dynatrace เข้า Supabase โดยกรองรายการซ้ำให้อัตโนมัติ """
-    # 1. กรองปัญหากลุ่มเดียวกันใน Dynatrace ไม่ให้ประมวลผลซ้ำ
     seen_ids = set()
     unique_problems = []
     for p in problems:
@@ -70,7 +69,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             seen_ids.add(pid)
             unique_problems.append(p)
 
-    # 2. นำรายการเข้า Database
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
@@ -87,11 +85,9 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         services_str = ", ".join(mz_list) if mz_list else "Default"
         title = prob.get("title", "Unknown Problem")
 
-        # เช็กกับ Supabase DB ว่ามี Problem ID นี้อยู่แล้วหรือยัง
         existing = supabase.table("alarm_comments").select("id").eq("problem_id", display_id).execute().data
 
         if not existing:
-            # ถ้ายังไม่มีใน DB ให้ทำการ Insert ใหม่เพียงครั้งเดียว
             db_payload = {
                 "problem_id": display_id,
                 "internal_id": internal_id,
@@ -110,7 +106,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             except Exception:
                 pass
         else:
-            # ถ้ามีอยู่แล้ว ให้ทำเฉพาะการ Update สถานะ + Duration
             update_payload = {
                 "status": dt_status,
                 "duration": duration_str,
@@ -118,50 +113,24 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             }
             supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
 
-def run_app():
-    st.title("🚨 Real-time Alarm Management Table")
-    st.caption("ตารางติดตามสถานะการแจ้งเตือนรองรับ Multi-Source Monitoring")
-
-    try:
-        supabase = init_supabase()
-    except Exception:
-        st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
+def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
+    """ ฟังก์ชันสร้าง UI การ์ดแสดงผลสำหรับแต่ละ Alarm """
+    if not items:
+        status_label = "ACTIVE" if is_active_tab else "RESOLVED"
+        st.info(f"💡 ไม่มีรายการ Alarm สถานะ {status_label} ในขณะนี้")
         return
 
-    # ปุ่ม Manual Sync
-    col1, col2 = st.columns([4, 1])
-    with col2:
-        if st.button("🔄 Sync Real-time", type="primary", use_container_width=True):
-            st.rerun()
-
-    # Sync ข้อมูล Dynatrace ล่าสุดลง DB
-    with st.spinner("กำลังอัปเดตข้อมูล Alarm จาก Dynatrace..."):
-        dt_problems = fetch_dynatrace_problems()
-        if dt_problems:
-            sync_dynatrace_to_db(supabase, dt_problems)
-
-    # ดึงรายการทั้งหมดจาก DB มาแสดงในตาราง
-    res = supabase.table("alarm_comments").select("*").order("id", desc=True).execute()
-    data = res.data
-
-    if not data:
-        st.info("💡 ไม่มีรายการ Alarm ในตารางขณะนี้")
-        return
-
-    st.subheader("📋 ตารางประวัติและสถานะ Alarm")
-
-    # วนลูปสร้าง UI แบบการจัดการเรียงเป็นแถวตาราง
-    for item in data:
+    for item in items:
         db_id = item["id"]
         prob_id = item["problem_id"]
         internal_id = item.get("internal_id")
-        status_color = "🔴" if item["status"] == "ACTIVE" else "🟢"
+        status_color = "🔴" if is_active_tab else "🟢"
 
         with st.expander(
-            f"{status_color} **[{item['status']}]** {prob_id} | {item['problem_name']} | Service: {item['services']}",
-            expanded=(item["status"] == "ACTIVE")
+            f"{status_color} **[{prob_id}]** {item['problem_name']} | Service: {item['services']}",
+            expanded=is_active_tab
         ):
-            # แสดงข้อมูลคอลัมน์เรียงตามโจทย์
+            # แสดงข้อมูลหลัก
             col_a, col_b, col_c, col_d = st.columns(4)
             with col_a:
                 st.write(f"**Ack:** `{item['ack'] if item['ack'] else '-'}`")
@@ -177,13 +146,18 @@ def run_app():
                 st.write(f"**Incident:** `{item['incident'] if item['incident'] else '-'}`")
 
             st.write(f"**Remark (Dynatrace Comment):** {item['remark'] if item['remark'] else '-'}")
+            
+            if internal_id:
+                dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
+                st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
+
             st.markdown("---")
 
             # --- โซนจัดการข้อมูล (Ack / Remark / Incident) ---
             st.markdown("🛠️ **จัดการข้อมูล Alert นี้:**")
             action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
 
-            # 1. ปุ่ม Ack (กดเพื่อใส่ชื่อ Test)
+            # 1. ปุ่ม Ack
             with action_col1:
                 st.write("**1. Acknowledge**")
                 if not item['ack']:
@@ -194,7 +168,7 @@ def run_app():
                 else:
                     st.info(f"ACKED โดย: {item['ack']}")
 
-            # 2. ฟอร์มเพิ่ม/อัปเดต Remark (ส่งเข้า Dynatrace + DB)
+            # 2. ฟอร์ม Remark (ส่ง Dynatrace + DB)
             with action_col2:
                 st.write("**2. Remark (ส่งเข้า Dynatrace)**")
                 with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
@@ -202,7 +176,6 @@ def run_app():
                     btn_remark = st.form_submit_button("🚀 ส่ง Remark")
 
                     if btn_remark and new_remark:
-                        # ยิงเข้า Dynatrace
                         dt_ok = post_comment_to_dynatrace(internal_id, new_remark) if internal_id else True
                         if dt_ok:
                             supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
@@ -211,7 +184,7 @@ def run_app():
                         else:
                             st.error("❌ ไม่สามารถส่ง Remark ไปยัง Dynatrace ได้")
 
-            # 3. ฟอร์มเพิ่ม Incident Number (ลง DB เท่านั้น)
+            # 3. ฟอร์ม Incident (ลง DB เท่านั้น)
             with action_col3:
                 st.write("**3. Incident Number (ลง DB เท่านั้น)**")
                 with st.form(key=f"form_incident_{db_id}", clear_on_submit=True):
@@ -222,3 +195,43 @@ def run_app():
                         supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
                         st.success("บันทึก Incident ลง DB สำเร็จ!")
                         st.rerun()
+
+def run_app():
+    st.title("🚨 Alarm Management Center")
+    st.caption("ตารางติดตามสถานะการแจ้งเตือนรองรับ Multi-Source Monitoring")
+
+    try:
+        supabase = init_supabase()
+    except Exception:
+        st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
+        return
+
+    # ปุ่ม Sync
+    col1, col2 = st.columns([4, 1])
+    with col2:
+        if st.button("🔄 Sync Real-time", type="primary", use_container_width=True):
+            st.rerun()
+
+    # Sync ข้อมูล Dynatrace
+    with st.spinner("กำลังอัปเดตข้อมูล Alarm จาก Dynatrace..."):
+        dt_problems = fetch_dynatrace_problems()
+        if dt_problems:
+            sync_dynatrace_to_db(supabase, dt_problems)
+
+    # ดึงข้อมูลแยกตาม Status จาก DB
+    active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
+    resolved_res = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+
+    # --- สร้าง แท็บแยก Active / Resolve ---
+    tab_active, tab_resolved = st.tabs([
+        f"🔴 Active Alarms ({len(active_res)})", 
+        f"🟢 Resolved History ({len(resolved_res)})"
+    ])
+
+    with tab_active:
+        st.subheader("⚠️ รายการ Alarm ที่กำลังเกิดขึ้น (Active)")
+        render_alarm_list(supabase, active_res, is_active_tab=True)
+
+    with tab_resolved:
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขเรียบร้อยแล้ว (Resolved)")
+        render_alarm_list(supabase, resolved_res, is_active_tab=False)
