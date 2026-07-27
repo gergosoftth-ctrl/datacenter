@@ -291,9 +291,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 # --- 5. Main App ---
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
-    
-    # 🎯 เริ่ม Background Worker ตั้งแต่รันแอปครั้งแรก
-    start_background_sync()
 
     try:
         supabase = init_supabase()
@@ -301,26 +298,19 @@ def run_app():
         st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
         return
 
-    # ปุ่ม Manual Sync ตัวช่วยกดดึงทันที
-    col_info, col_btn = st.columns([3, 1])
-    with col_btn:
-        if st.button("⚡ Force Sync Now", type="primary", use_container_width=True):
-            with st.spinner("กำลัง Sync สดจาก Dynatrace..."):
-                sync_dynatrace_to_db(supabase)
-                st.rerun()
-
-    # Auto Refresh หน้าจอ UI จาก DB ทุกๆ 5 วินาที
-    refresh_count = st_autorefresh(interval=5000, key="db_ui_reader")
+    # 1. บังคับยิง API Dynatrace สดๆ ทุกรอบที่หน้าจอโหลด
     now_time_str = datetime.now(TZ_TH).strftime('%H:%M:%S')
-    
-    with col_info:
-        st.caption(f"🤖 **Background Auto-Sync Active** | อ่าน DB ล่าสุดเมื่อ: `{now_time_str}` (รอบที่ {refresh_count})")
+    st.caption(f"⚡ **Direct Live Fetching Active** | ดึงข้อมูลสดเมื่อ: `{now_time_str}`")
 
-    # ดึงค่าจาก Supabase DB ตรงๆ มาโชว์
+    with st.spinner("กำลังดึง Alert ล่าสุดจาก Dynatrace..."):
+        dt_problems = fetch_dynatrace_problems()
+        if dt_problems:
+            sync_dynatrace_to_db(supabase, dt_problems)
+
+    # 2. อ่านข้อมูลล่าสุดจาก DB
     try:
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
         raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
-        
         resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
         if not resolved_res and raw_resolved:
             resolved_res = raw_resolved[:20]
@@ -328,6 +318,7 @@ def run_app():
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
         return
 
+    # 3. Render UI
     tab_active, tab_resolved = st.tabs([
         f"🔴 Active Alarms ({len(active_res)})", 
         f"🟢 Resolved History ({len(resolved_res)})"
@@ -340,3 +331,7 @@ def run_app():
     with tab_resolved:
         st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว")
         render_alarm_list(supabase, resolved_res, is_active_tab=False)
+
+    # 4. บังคับสั่ง Rerun ตัวเองอัตโนมัติทุกๆ 10 วินาที
+    time.sleep(10)
+    st.rerun()
