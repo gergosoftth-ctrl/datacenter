@@ -73,7 +73,7 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
         return True
 
 def sync_dynatrace_to_db(supabase: Client, problems: list):
-    """ ดึง Alarm จาก Dynatrace เข้า Supabase พร้อมระบุ type = 'Dynatrace' """
+    """ ดึง Alarm จาก Dynatrace เข้า Supabase และอัปเดตสถานะ RESOLVED/CLOSED ลง DB """
     seen_ids = set()
     unique_problems = []
     for p in problems:
@@ -85,7 +85,10 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
-        dt_status = "ACTIVE" if prob.get("status") == "OPEN" else "RESOLVED"
+        
+        # 🎯 จุดแก้ 1: รองรับสถานะ RESOLVED และ CLOSED จาก Dynatrace v2 API
+        raw_status = prob.get("status", "").upper()
+        dt_status = "ACTIVE" if raw_status == "OPEN" else "RESOLVED"
         
         start_ms = prob.get("startTime", 0)
         end_ms = prob.get("endTime", -1)
@@ -101,17 +104,17 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
 
         # Impacted Entities -> Impact
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
-        impact_str = ", ".join(impacted_list) if impacted_list else "-"
+        impact_str = ", ".join(impacted_list) if impacted_str else "-"
 
         # ดึง Comment ล่าสุดจาก Dynatrace
         dt_comments = prob.get("comments", [])
         latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
 
-        existing = supabase.table("alarm_comments").select("id, remark").eq("problem_id", display_id).execute().data
+        existing = supabase.table("alarm_comments").select("id, status").eq("problem_id", display_id).execute().data
 
         if not existing:
             db_payload = {
-                "type": "Dynatrace",           # บันทึกชนิดเป็น Dynatrace
+                "type": "Dynatrace",
                 "problem_id": display_id,
                 "internal_id": internal_id,
                 "status": dt_status,
@@ -130,15 +133,20 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
             except Exception:
                 pass
         else:
+            # 🎯 จุดแก้ 2: อัปเดตสถานะ, Duration และ Resolve Date เสมอ
             update_payload = {
                 "status": dt_status,
                 "duration": duration_str,
-                "impact": impact_str,
-                "resolve_date": resolve_dt_str if end_ms > 0 else None
+                "impact": impact_str
             }
+            
+            if end_ms > 0:
+                update_payload["resolve_date"] = resolve_dt_str
+
             if dt_status == "RESOLVED" and latest_dt_comment:
                 update_payload["remark"] = latest_dt_comment
 
+            # บังคับ Update ข้อมูลใน Supabase
             supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
 
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
