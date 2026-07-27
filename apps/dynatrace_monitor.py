@@ -21,7 +21,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึง Problems จาก Dynatrace (แยก Query ดึง OPEN และ RESOLVED ย้อนหลัง 24 ชั่วโมง) ---
+# --- 1. ดึง Problems จาก Dynatrace (ดึงข้อมูล 2 ชม. ย้อนหลังแบบไม่จำกัด Filter) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -32,30 +32,21 @@ def fetch_dynatrace_problems():
     }
     
     fields_query = "displayId,problemId,title,status,severityLevel,impactLevel,startTime,endTime,impactedEntities,managementZones,alertingProfiles,comments"
-    all_problems = []
-
-    # 1. ดึงรายการสถานะ OPEN ทั้งหมด
-    endpoint_open = f"{dt_url}/api/v2/problems?problemSelector=status(\"OPEN\")&fields={fields_query}&pageSize=20"
+    
+    # ยิงดึงย้อนหลัง 2 ชม. แบบไม่ใส่ status selector
+    endpoint = f"{dt_url}/api/v2/problems?from=-2h&fields={fields_query}&pageSize=50"
+    
     try:
-        res_open = requests.get(endpoint_open, headers=headers, timeout=10)
-        if res_open.status_code == 200:
-            all_problems.extend(res_open.json().get("problems", []))
-    except Exception as e:
-        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล OPEN: {str(e)}")
-
-    # 2. ดึงรายการสถานะ RESOLVED ย้อนหลัง 24 ชั่วโมง (เติม from=-24h)
-    endpoint_resolved = f"{dt_url}/api/v2/problems?problemSelector=status(\"RESOLVED\")&from=-24h&fields={fields_query}&pageSize=20"
-    try:
-        res_resolved = requests.get(endpoint_resolved, headers=headers, timeout=10)
-        if res_resolved.status_code == 200:
-            all_problems.extend(res_resolved.json().get("problems", []))
+        res = requests.get(endpoint, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json().get("problems", [])
         else:
-            # กรณีไม่มีสิทธิ์หรือไม่มีข้อมูลในช่วงเวลา ให้ข้ามโดยไม่ขัดจังหวะการทำงาน
-            pass
+            st.error(f"❌ ดึงข้อมูลไม่สำเร็จ (Status: {res.status_code})")
+            st.caption(f"Response: {res.text}")
+            return []
     except Exception as e:
-        pass
-
-    return all_problems
+        st.error(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ: {str(e)}")
+        return []
 
 # --- 2. ส่ง Comment เข้า Dynatrace ---
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
