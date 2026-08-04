@@ -44,30 +44,32 @@ def fetch_dynatrace_problems():
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
-# --- 2. 🎯 ดึง Comment ล่าสุดจาก Dynatrace API แบบเจาะจง Problem ID ---
+# --- 2. 🎯 [จุดแก้ไขสำคัญ] ดึง Comment ล่าสุดยิงตรงไปที่ /comments Endpoint ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
-    """ ดึง Comment ตัวล่าสุดจาก Dynatrace ปัญหาตัวนั้นๆ เสมอ """
+    """ ยิงเจาะจง Endpoint /comments เพื่อดึง Comment ล่าสุด 100% """
     if not internal_id:
         return None
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    endpoint = f"{dt_url}/api/v2/problems/{internal_id}"
+    # 🎯 เรียก Endpoint ดึง Comments โดยเฉพาะ
+    endpoint = f"{dt_url}/api/v2/problems/{internal_id}/comments"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=5)
         if res.status_code == 200:
-            prob_data = res.json()
-            comments = prob_data.get("comments", [])
+            data = res.json()
+            comments = data.get("comments", [])
             if comments:
+                # ดึง Comment ตัวล่าสุด (ลำดับสุดท้ายของ Array)
                 latest = comments[-1]
                 author = latest.get("authorName", "Dynatrace User")
                 msg = latest.get("message", "")
                 if msg:
                     return f"[{author}]: {msg}" if author and author != "Dynatrace User" else msg
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error fetching comments for {internal_id}: {e}")
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
@@ -108,7 +110,7 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 4. 🎯 Sync ข้อมูลลง DB โดยอัปเดต Remark ด้วย Comment ล่าสุดจาก Dynatrace ทุกรอบ ---
+# --- 4. Sync ข้อมูลลง DB โดยดึง Comment ล่าสุดใส่ลง DB เสมอ ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     if not problems:
         return
@@ -129,7 +131,6 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 open_problem_ids.add(display_id)
                 open_problem_ids.add(internal_id)
 
-    # 4.1 บันทึกรายการใหม่ หรือ อัปเดตรายการเดิมใน DB
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
@@ -151,7 +152,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # ⚡ ดึง Comment ล่าสุดสดๆ จาก Dynatrace สำหรับ Alert นี้
+        # 🎯 ดึง Comment ล่าสุดจาก Endpoint /comments สดๆ
         latest_comment = fetch_latest_comment_from_dt(internal_id)
 
         try:
@@ -170,7 +171,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                     "duration": duration_str,
                     "resolve_date": resolve_dt_str if end_ms > 0 else None,
                     "ack": None,
-                    "remark": latest_comment, # บันทึก Comment ล่าสุด
+                    "remark": latest_comment,
                     "incident": None
                 }
                 supabase.table("alarm_comments").insert(db_payload).execute()
@@ -183,7 +184,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
-                # ⚡ บังคับเอา Comment ล่าสุดจาก Dynatrace อัปเดตลงช่อง remark ใน DB เสมอ (ถ้ามี)
+                # 🎯 หากเจอมันมี Comment ใน Dynatrace ให้อัปเดตลง DB ทันที
                 if latest_comment:
                     update_payload["remark"] = latest_comment
 
@@ -191,7 +192,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-    # 4.2 เคลียร์เคสค้างใน DB ที่ปิดไปแล้วใน Dynatrace
+    # เคลียร์เคสค้างใน DB ที่ปิดไปแล้วใน Dynatrace
     try:
         active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
         for db_item in active_in_db:
@@ -254,7 +255,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             
-            # แสดง Remark จาก DB (ซึ่งจะตรงกับ Comment ล่าสุดใน Dynatrace)
             remark_text = item['remark'] if item['remark'] else '-'
             st.markdown(f"**Remark (Comment):**\n```\n{remark_text}\n```")
             
@@ -291,11 +291,9 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
                     if btn_remark and new_remark:
                         try:
-                            # ยิงเข้า Dynatrace API ก่อน
                             if internal_id:
                                 post_comment_to_dynatrace(internal_id, new_remark)
                             
-                            # อัปเดตลง DB ทันที
                             supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
                             st.success("บันทึก Remark เรียบร้อย!")
                             st.rerun()
@@ -321,7 +319,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
 
-    # ตั้งเวลา Auto Refresh ทุกๆ 30 วินาที
     st_autorefresh(interval=30000, key="dt_dashboard_auto_refresh")
 
     try:
