@@ -22,21 +22,19 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงรายการ Problems รวมแบบ URL มาตรฐาน (ไม่ใส่ fields=comments เพื่อไม่ให้ API พัง) ---
+# --- 1. ดึงรายการ Problems จาก Dynatrace API ย้อนหลังแค่ 1 ชั่วโมง (-1h) ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # 🎯 ใช้ URL มาตรฐานของ Dynatrace v2 ย้อนหลัง 24 ชม.
-    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100"
+    # 🎯 ปรับเป็น from=-1h เพื่อให้ดึงรวดเร็ว ไม่ค้าง
+    endpoint = f"{dt_url}/api/v2/problems?from=-1h&pageSize=50"
     
     try:
-        res = requests.get(endpoint, headers=headers, timeout=10)
+        res = requests.get(endpoint, headers=headers, timeout=8)
         if res.status_code == 200:
             return res.json().get("problems", [])
-        
-        st.warning(f"⚠️ Dynatrace API ตอบกลับด้วย Status Code: {res.status_code}")
         return []
     except Exception as e:
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
@@ -50,11 +48,10 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # 🎯 ยิงเจาะจง Endpoint /comments ของ Dynatrace
     endpoint = f"{dt_url}/api/v2/problems/{internal_id}/comments"
     
     try:
-        res = requests.get(endpoint, headers=headers, timeout=5)
+        res = requests.get(endpoint, headers=headers, timeout=4)
         if res.status_code == 200:
             data = res.json()
             comments = data.get("comments", [])
@@ -137,7 +134,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # 🎯 ยิงดึง Comment ล่าสุดสดๆ จาก Endpoint /comments
+        # 🎯 ดึง Comment ล่าสุด
         latest_comment = fetch_latest_comment_from_dt(internal_id)
 
         try:
@@ -289,7 +286,7 @@ def run_app():
 
     col_info, col_btn = st.columns([3, 1])
     with col_info:
-        st.caption(f"⚡ **Dynatrace Live Sync Active** (Auto 30s) | ดึงข้อมูลล่าสุดเมื่อ: `{now_time_str}`")
+        st.caption(f"⚡ **Dynatrace Live Sync Active** (Auto 30s) | ดึงข้อมูลย้อนหลัง 1 ชม. ล่าสุดเมื่อ: `{now_time_str}`")
     with col_btn:
         if st.button("🔄 ⚡ บังคับ Sync เดี๋ยวนี้", type="primary", use_container_width=True):
             with st.spinner("กำลังดึง Alert ล่าสุดจาก Dynatrace..."):
@@ -298,7 +295,7 @@ def run_app():
                     sync_dynatrace_to_db(supabase, dt_problems)
                     st.success("Sync ข้อมูลล่าสุดเรียบร้อย!")
                 else:
-                    st.warning("ไม่พบรายการ Alert สดย้อนหลัง 24 ชม. จาก Dynatrace")
+                    st.info("ไม่มีรายการ Alert สดย้อนหลัง 1 ชม. จาก Dynatrace")
                 st.rerun()
 
     # Sync ปกติ
@@ -309,7 +306,7 @@ def run_app():
     # อ่านจาก DB
     try:
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
-        resolved_res = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).limit(50).execute().data
+        resolved_res = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).limit(20).execute().data
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
         return
@@ -324,5 +321,5 @@ def run_app():
         render_alarm_list(supabase, active_res, is_active_tab=True)
 
     with tab_resolved:
-        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (ย้อนหลัง 24 ชม.)")
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (ล่าสุด)")
         render_alarm_list(supabase, resolved_res, is_active_tab=False)
