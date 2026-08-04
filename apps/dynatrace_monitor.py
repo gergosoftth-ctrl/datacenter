@@ -181,36 +181,54 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-# --- 🎯 ฟังก์ชัน Pop-up Modal สำหรับจัดการ Alert (ACK, Remark, Incident) ---
-@st.dialog("⚙️ จัดการข้อมูล Alert")
+# --- 🎯 Pop-up Context Menu (สไตล์ Windows Right-Click Menu) ---
+@st.dialog("🖱️ Windows Context Menu - จัดการ Alert")
 def open_action_dialog(supabase: Client, item: dict):
     db_id = item["id"]
     prob_id = item["problem_id"]
     internal_id = item.get("internal_id")
     
-    st.markdown(f"### 📌 รายการ: **[{prob_id}]** {item['problem_name']}")
+    st.markdown(f"### 📌 **[{prob_id}]** {item['problem_name']}")
+    st.caption("เลือก Action ที่ต้องการดำเนินการกับ Alert รายการนี้:")
     st.markdown("---")
     
-    # --- Section 1: Acknowledge ---
-    st.subheader("1. Acknowledge Status")
+    # 1. Acknowledge
+    st.markdown("##### 1️⃣ Acknowledge Action")
     if not item.get('ack'):
-        if st.button("✅ ยืนยัน ACK Alert นี้", key=f"dlg_ack_{db_id}", use_container_width=True, type="primary"):
+        if st.button("✅ ยืนยัน ACK Alert", key=f"dlg_ack_{db_id}", use_container_width=True, type="primary"):
             try:
                 supabase.table("alarm_comments").update({"ack": "ACKED"}).eq("id", db_id).execute()
-                st.success("บันทึก ACK เรียบร้อย!")
+                st.toast(f"✅ บันทึก ACK ให้กับ [{prob_id}] เรียบร้อย!", icon="🎉")
                 st.rerun()
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาด: {str(e)}")
     else:
-        st.info(f"🟢 ACKED แล้วโดย: **{item['ack']}**")
+        st.info(f"🟢 สถานะ: **ACKED** เรียบร้อยแล้ว (`{item['ack']}`)")
 
     st.markdown("---")
 
-    # --- Section 2: Remark (Comment) ---
-    st.subheader("2. Remark / Comment (ส่งไป Dynatrace)")
+    # 2. Incident Number
+    st.markdown("##### 2️⃣ Incident Management")
+    with st.form(key=f"dlg_form_inc_{db_id}", clear_on_submit=True):
+        current_inc = item.get('incident') or ""
+        new_inc = st.text_input("เลข Incident:", value=current_inc, placeholder="เช่น INC1234567")
+        btn_inc = st.form_submit_button("💾 บันทึกเลข Incident", use_container_width=True)
+
+        if btn_inc and new_inc:
+            try:
+                supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
+                st.toast(f"💾 บันทึก Incident `{new_inc}` เรียบร้อย!", icon="📌")
+                st.rerun()
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+
+    st.markdown("---")
+
+    # 3. Remark / Comment
+    st.markdown("##### 3️⃣ Add Remark (ยิงไป Dynatrace)")
     with st.form(key=f"dlg_form_remark_{db_id}", clear_on_submit=True):
         current_remark = item.get('remark') or ""
-        new_remark = st.text_area("กรอกข้อความ Remark ใหม่:", value=current_remark, height=100)
+        new_remark = st.text_area("กรอกข้อความ Remark:", value=current_remark, height=90, placeholder="พิมพ์รายละเอียดที่นี่...")
         btn_remark = st.form_submit_button("🚀 บันทึก Remark ลง Dynatrace & DB", use_container_width=True)
 
         if btn_remark and new_remark:
@@ -218,30 +236,13 @@ def open_action_dialog(supabase: Client, item: dict):
                 if internal_id:
                     post_comment_to_dynatrace(internal_id, new_remark)
                 supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
-                st.success("บันทึก Remark เรียบร้อย!")
+                st.toast("🚀 บันทึก Remark ลง Dynatrace เรียบร้อย!", icon="💬")
                 st.rerun()
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
-
-    st.markdown("---")
-
-    # --- Section 3: Incident Number ---
-    st.subheader("3. Incident Number")
-    with st.form(key=f"dlg_form_inc_{db_id}", clear_on_submit=True):
-        current_inc = item.get('incident') or ""
-        new_inc = st.text_input("กรอกเลข Incident (เช่น INC12345):", value=current_inc)
-        btn_inc = st.form_submit_button("💾 บันทึกเลข Incident", use_container_width=True)
-
-        if btn_inc and new_inc:
-            try:
-                supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
-                st.success("บันทึก Incident เรียบร้อย!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
+                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
 
-# --- 5. Render หน้า UI (คลีนกล่องให้เรียบหรู + โชว์เฉพาะสถานะสรุป) ---
+# --- 5. Render หน้า UI (คลีนเหลือเฉพาะ ACK / INCIDENT และปุ่ม Context Menu) ---
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
         status_label = "ACTIVE" if is_active_tab else "RESOLVED"
@@ -268,21 +269,21 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             st.session_state[f"refreshed_{db_id}"] = False
 
         with st.expander(expander_title, expanded=is_refresh_clicked):
-            # --- แถบปุ่มควบคุมด้านบน ---
-            top_col1, top_col2, top_col3 = st.columns([2.5, 1, 1.5])
+            # --- แถบปุ่มควบคุม Context Menu ---
+            top_col1, top_col2, top_col3 = st.columns([2.5, 1.3, 1.2])
             
             with top_col1:
                 st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
             
             with top_col2:
-                # 🎯 ปุ่มเปิด Pop-up Modal จัดการข้อมูล (ทำหน้าที่แทนคลิกขวา)
-                if st.button("⚙️ จัดการ / แก้ไข", key=f"btn_manage_{db_id}", use_container_width=True, type="secondary"):
+                # 🎯 ปุ่มทำหน้าที่แทนการคลิกขวา (Windows Context Menu)
+                if st.button("🖱️ คลิกขวา / เมนู", key=f"btn_ctx_{db_id}", use_container_width=True, type="primary"):
                     open_action_dialog(supabase, item)
 
             with top_col3:
-                # ปุ่ม Refresh เฉพาะกล่อง
+                # ปุ่ม Refresh เฉพาะกล่องนี้
                 if st.button("🔄 Refresh กล่องนี้", key=f"btn_refresh_{db_id}", use_container_width=True):
-                    with st.spinner("ดึงข้อมูล..."):
+                    with st.spinner("กำลังอัปเดต..."):
                         if internal_id:
                             fresh_comment = fetch_latest_comment_from_dt(internal_id)
                             if fresh_comment:
@@ -296,13 +297,12 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.markdown("---")
 
-            # --- ส่วนแสดงสถานะสรุป (ACK / INCIDENT / REMARK) ---
-            st.markdown("📊 **สรุปสถานะการดำเนินการ:**")
-            st_col1, st_col2, st_col3 = st.columns(3)
+            # --- ส่วนแสดงสถานะสรุป (ตัด Remark ออก เหลือแค่ ACK / INCIDENT) ---
+            st_col1, st_col2 = st.columns(2)
             
             with st_col1:
                 if item.get('ack'):
-                    st.success(f"✅ **ACK แล้ว:** `{item['ack']}`")
+                    st.success(f"✅ **ACKED:** `{item['ack']}`")
                 else:
                     st.warning("⚠️ **ยังไม่ได้ ACK**")
 
@@ -312,15 +312,9 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 else:
                     st.warning("⚠️ **ยังไม่มี Incident**")
 
-            with st_col3:
-                if item.get('remark'):
-                    st.success("💬 **มี Remark แล้ว**")
-                else:
-                    st.warning("⚠️ **ยังไม่มี Remark**")
-
             st.markdown("---")
 
-            # --- ส่วนแสดงรายละเอียดข้อมูล Alert ---
+            # --- รายละเอียดข้อมูล Alert ---
             col_a, col_b, col_c, col_d = st.columns([1.5, 2, 2, 2])
             with col_a:
                 st.write(f"**Status:** {item['status']}")
@@ -335,7 +329,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             
-            # แสดงเนื้อหา Remark (ถ้ามี)
+            # ช่องแสดง Remark (Comment) แบบดั้งเดิม
             remark_text = item['remark'] if item['remark'] else '-'
             st.markdown(f"**Remark (Comment ล่าสุด):**\n```\n{remark_text}\n```")
             
