@@ -45,30 +45,37 @@ def fetch_dynatrace_problems():
         return []
 
 # --- 2. 🎯 [จุดแก้ไขสำคัญ] ดึง Comment ล่าสุดยิงตรงไปที่ /comments Endpoint ---
+# --- 🎯 ฟังก์ชันดึง Comment ล่าสุดฉบับแก้ไขสมบูรณ์ ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
+    """ ดึง Comment ล่าสุดจาก Dynatrace v2 โดยยิงไปที่ /comments Endpoint ตรงๆ """
     if not internal_id:
         return None
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # 🧪 ยิงดึงข้อมูล Problem ตัวเต็มมาดูโครงสร้าง
-    endpoint = f"{dt_url}/api/v2/problems/{internal_id}?fields=comments"
+    # ⚡ ยิงไปที่ Sub-resource /comments โดยตรง
+    endpoint = f"{dt_url}/api/v2/problems/{internal_id}/comments"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=5)
-        st.write(f"🔍 **Debug PID [{internal_id}]** -> Status Code: `{res.status_code}`")
         if res.status_code == 200:
             data = res.json()
-            st.json(data.get("comments", "NO_COMMENTS_KEY_FOUND")) # โชว์ JSON ของ Comments บนหน้าเว็บเลย
+            
+            # (ลบ Debug ออกแล้ว แต่ถ้าอยากดู JSON ให้ใช้อันนี้)
+            # st.json(data)
+            
             comments = data.get("comments", [])
             if comments:
+                # คว้า Comment ตัวสุดท้ายใน Array (ล่าสุดเสมอ)
                 latest = comments[-1]
-                return f"[{latest.get('authorName')}]: {latest.get('message')}"
-        else:
-            st.error(f"❌ API Error Response: {res.text}")
+                author = latest.get("authorName") or latest.get("author") or "User"
+                msg = latest.get("message", "").strip()
+                
+                if msg:
+                    return f"[{author}]: {msg}" if author != "User" else msg
     except Exception as e:
-        st.error(f"❌ Exception: {str(e)}")
+        print(f"Error fetching comments for {internal_id}: {e}")
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
