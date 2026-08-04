@@ -230,4 +230,114 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             
             remark_text = item['remark'] if item['remark'] else '-'
-            st.markdown(f"**Remark (Comment):**\n```\n{remark_text}\n
+            st.markdown(f"**Remark (Comment):**\n```\n{remark_text}\n```")
+            
+            if internal_id:
+                dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
+                st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
+
+            st.markdown("---")
+
+            # Actions
+            st.markdown("🛠️ **แก้ไขข้อมูลบน Dashboard:**")
+            action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
+
+            with action_col1:
+                st.write("**1. Acknowledge**")
+                if not item['ack']:
+                    if st.button("✅ ACK Alert", key=f"btn_ack_{db_id}", use_container_width=True):
+                        try:
+                            supabase.table("alarm_comments").update({"ack": "Test"}).eq("id", db_id).execute()
+                            st.success("บันทึก Ack เรียบร้อย!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+                else:
+                    st.info(f"ACKED โดย: {item['ack']}")
+
+            with action_col2:
+                st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
+                with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
+                    new_remark = st.text_area("กรอก Remark / Comment:", key=f"input_remark_{db_id}", height=100)
+                    btn_remark = st.form_submit_button("🚀 บันทึก Remark")
+
+                    if btn_remark and new_remark:
+                        try:
+                            if internal_id:
+                                post_comment_to_dynatrace(internal_id, new_remark)
+                            supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
+                            st.success("บันทึก Remark เรียบร้อย!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
+
+            with action_col3:
+                st.write("**3. Incident Number (อัปเดต DB)**")
+                with st.form(key=f"form_incident_{db_id}", clear_on_submit=True):
+                    new_inc = st.text_input("กรอกเลข Incident:", key=f"input_inc_{db_id}")
+                    btn_inc = st.form_submit_button("💾 บันทึก Incident")
+
+                    if btn_inc and new_inc:
+                        try:
+                            supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
+                            st.success("บันทึก Incident เรียบร้อย!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
+
+# --- 6. Main App ---
+def run_app():
+    st.title("🚨 Real-time Alarm Management Center")
+
+    st_autorefresh(interval=30000, key="dt_dashboard_auto_refresh")
+
+    try:
+        supabase = init_supabase()
+    except Exception:
+        st.error("❌ ไม่สามารถเชื่อมต่อ Supabase ได้")
+        return
+
+    now_time_str = datetime.now(TZ_TH).strftime('%H:%M:%S')
+
+    col_info, col_btn = st.columns([3, 1])
+    with col_info:
+        st.caption(f"⚡ **Dynatrace Live Sync Active** (Auto 30s) | เวลาปัจจุบัน: `{now_time_str}`")
+    with col_btn:
+        if st.button("🔄 ⚡ บังคับ Sync เดี๋ยวนี้", type="primary", use_container_width=True):
+            with st.spinner("กำลังดึง Alert ล่าสุดจาก Dynatrace..."):
+                dt_problems = fetch_dynatrace_problems()
+                if dt_problems:
+                    sync_dynatrace_to_db(supabase, dt_problems)
+                    st.success("Sync ข้อมูลล่าสุดเรียบร้อย!")
+                else:
+                    st.info("ไม่มีรายการ Alert สดย้อนหลัง 1 ชม. จาก Dynatrace")
+                st.rerun()
+
+    # Sync ปกติ
+    dt_problems = fetch_dynatrace_problems()
+    if dt_problems:
+        sync_dynatrace_to_db(supabase, dt_problems)
+
+    # อ่านจาก DB
+    try:
+        active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
+        raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
+        
+        # 🎯 กรองเฉพาะรายการ Resolved ที่ Start Date จนถึงปัจจุบัน ไม่เกิน 1 ชั่วโมง (3600 วินาที)
+        resolved_res = [item for item in raw_resolved if is_start_within_last_1_hour(item.get("start_date"))]
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
+        return
+
+    tab_active, tab_resolved = st.tabs([
+        f"🔴 Active Alarms ({len(active_res)})", 
+        f"🟢 Resolved History ({len(resolved_res)})"
+    ])
+
+    with tab_active:
+        st.subheader("⚠️ รายการ Alarm ที่กำลังเกิดขึ้น (Active)")
+        render_alarm_list(supabase, active_res, is_active_tab=True)
+
+    with tab_resolved:
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (Start Date ไม่เกิน 1 ชม.)")
+        render_alarm_list(supabase, resolved_res, is_active_tab=False)
