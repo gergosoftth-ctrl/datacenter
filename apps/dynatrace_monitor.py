@@ -181,7 +181,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-# --- 5. Render หน้า UI ---
+# --- 5. Render หน้า UI (ปรับปรุงปุ่ม Refresh เฉพาะกล่อง) ---
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
         status_label = "ACTIVE" if is_active_tab else "RESOLVED"
@@ -203,19 +203,32 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
         )
 
-        with st.expander(expander_title, expanded=False):
-            # 🎯 เพิ่มแถบเครื่องมือด่วน + ปุ่ม Refresh เฉพาะในกล่อง Alarm นี้
-            top_col1, top_col2 = st.columns([4, 1])
+        # 🎯 เช็กว่าปุ่ม Refresh ของกล่องนี้เพิ่งถูกกดหรือไม่ เพื่อตั้งค่าให้ Expander กางค้างไว้
+        is_refresh_clicked = st.session_state.get(f"refreshed_{db_id}", False)
+        if is_refresh_clicked:
+            st.session_state[f"refreshed_{db_id}"] = False # รีเซ็ต state หลังใช้งาน
+
+        with st.expander(expander_title, expanded=is_refresh_clicked):
+            top_col1, top_col2 = st.columns([3.5, 1.5])
             with top_col1:
                 st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
             with top_col2:
-                # 🎯 ปุ่ม Refresh ดึง Comment สดรายตัว
-                if st.button("🔄 Refresh", key=f"btn_refresh_{db_id}", use_container_width=True):
-                    with st.spinner("กำลังอัปเดต..."):
+                # 🎯 ปุ่ม Refresh เจาะจงยิงดึงเฉพาะ PID นี้รายการเดียว
+                if st.button("🔄 Refresh กล่องนี้", key=f"btn_refresh_{db_id}", use_container_width=True):
+                    with st.spinner("ดึง Comment ล่าสุด..."):
                         if internal_id:
                             fresh_comment = fetch_latest_comment_from_dt(internal_id)
                             if fresh_comment:
+                                # 1. อัปเดตลง DB
                                 supabase.table("alarm_comments").update({"remark": fresh_comment}).eq("id", db_id).execute()
+                                # 2. อัปเดตข้อมูลใน Object memory ทันที
+                                item['remark'] = fresh_comment
+                                st.toast(f"✅ อัปเดต Comment ของ [{prob_id}] สำเร็จ!", icon="🎉")
+                            else:
+                                st.toast(f"ℹ️ ไม่พบ Comment ใหม่ใน Dynatrace", icon="🔍")
+                    
+                    # บันทึก state ให้กล่องกางค้างไว้หลัง Re-run
+                    st.session_state[f"refreshed_{db_id}"] = True
                     st.rerun()
 
             col_a, col_b, col_c, col_d = st.columns([1.5, 2, 2, 2])
