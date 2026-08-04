@@ -121,6 +121,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
+        # ดึง Comment ล่าสุดจาก Dynatrace
         dt_comments = prob.get("comments", [])
         latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
 
@@ -153,13 +154,29 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
-                # ถ้ารายการกลายเป็น RESOLVED และมี Comment ใน Dynatrace ให้ดึง Comment ล่าสุดมาลง DB ทันที
+                # 🎯 แก้ตรงนี้: หากสถานะเป็น RESOLVED และมี Comment ล่าสุดจาก Dynatrace ให้อัปเดตลง DB ทันที
                 if dt_status == "RESOLVED" and latest_dt_comment:
                     update_payload["remark"] = latest_dt_comment
 
                 supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
         except Exception:
             continue
+
+    # 2. ปรับ ACTIVE -> RESOLVED สำหรับรายการที่ปิดไปแล้ว
+    try:
+        active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
+        for db_item in active_in_db:
+            p_id = db_item.get("problem_id")
+            i_id = db_item.get("internal_id")
+            
+            if p_id not in open_problem_ids and i_id not in open_problem_ids:
+                now_str = datetime.now(TZ_TH).strftime('%b %d %H:%M')
+                supabase.table("alarm_comments").update({
+                    "status": "RESOLVED",
+                    "resolve_date": now_str
+                }).eq("problem_id", p_id).execute()
+    except Exception:
+        pass
 
     # 2. ปรับ ACTIVE -> RESOLVED สำหรับรายการที่ปิดไปแล้ว
     try:
