@@ -46,30 +46,29 @@ def fetch_dynatrace_problems():
 
 # --- 2. 🎯 [จุดแก้ไขสำคัญ] ดึง Comment ล่าสุดยิงตรงไปที่ /comments Endpoint ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
-    """ ยิงเจาะจง Endpoint /comments เพื่อดึง Comment ล่าสุด 100% """
     if not internal_id:
         return None
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    # 🎯 เรียก Endpoint ดึง Comments โดยเฉพาะ
-    endpoint = f"{dt_url}/api/v2/problems/{internal_id}/comments"
+    # 🧪 ยิงดึงข้อมูล Problem ตัวเต็มมาดูโครงสร้าง
+    endpoint = f"{dt_url}/api/v2/problems/{internal_id}?fields=comments"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=5)
+        st.write(f"🔍 **Debug PID [{internal_id}]** -> Status Code: `{res.status_code}`")
         if res.status_code == 200:
             data = res.json()
+            st.json(data.get("comments", "NO_COMMENTS_KEY_FOUND")) # โชว์ JSON ของ Comments บนหน้าเว็บเลย
             comments = data.get("comments", [])
             if comments:
-                # ดึง Comment ตัวล่าสุด (ลำดับสุดท้ายของ Array)
                 latest = comments[-1]
-                author = latest.get("authorName", "Dynatrace User")
-                msg = latest.get("message", "")
-                if msg:
-                    return f"[{author}]: {msg}" if author and author != "Dynatrace User" else msg
+                return f"[{latest.get('authorName')}]: {latest.get('message')}"
+        else:
+            st.error(f"❌ API Error Response: {res.text}")
     except Exception as e:
-        print(f"Error fetching comments for {internal_id}: {e}")
+        st.error(f"❌ Exception: {str(e)}")
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
