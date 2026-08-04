@@ -322,7 +322,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                         except Exception as e:
                             st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
 
-# --- 6. ฟังก์ชันหลักสำหรับรันแอป ---
+# --- 6. ฟังก์ชันหลักสำหรับรันแอป (ฉบับแก้ไขการดึงข้อมูลหลังล้าง DB) ---
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
 
@@ -347,7 +347,7 @@ def run_app():
                     sync_dynatrace_to_db(supabase, dt_problems)
                     st.success("Sync ข้อมูลล่าสุดเรียบร้อย!")
                 else:
-                    st.error("ไม่สามารถดึงข้อมูลจาก Dynatrace ได้ในขณะนี้")
+                    st.warning("ไม่มีรายการ Alert สดย้อนหลัง 24 ชม. จาก Dynatrace")
                 st.rerun()
 
     # STEP 1 & 2: Sync ข้อมูลตามรอบปกติ
@@ -355,14 +355,12 @@ def run_app():
     if dt_problems:
         sync_dynatrace_to_db(supabase, dt_problems)
 
-    # STEP 3: อ่านจาก DB มาแสดงผล
+    # STEP 3: อ่านจาก DB มาแสดงผล (ปลดล็อกตัวกรอง 1 ชม. เพื่อโชว์ประวัติ Resolved ล่าสุด)
     try:
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
-        raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
         
-        resolved_res = [item for item in raw_resolved if is_within_last_1_hour(item.get("start_date"))]
-        if not resolved_res and raw_resolved:
-            resolved_res = raw_resolved[:20]
+        # 🎯 ดึงประวัติ RESOLVED ทั้งหมดที่ Sync มาย้อนหลัง 24 ชม. มาแสดงผลทันที (ไม่เกิน 50 รายการล่าสุด)
+        resolved_res = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).limit(50).execute().data
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
         return
@@ -378,5 +376,5 @@ def run_app():
         render_alarm_list(supabase, active_res, is_active_tab=True)
 
     with tab_resolved:
-        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว")
+        st.subheader("✅ ประวัติ Alarm ที่แก้ไขแล้ว (ย้อนหลัง 24 ชม.)")
         render_alarm_list(supabase, resolved_res, is_active_tab=False)
