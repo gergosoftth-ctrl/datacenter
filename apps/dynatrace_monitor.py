@@ -181,7 +181,67 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-# --- 5. Render หน้า UI (ปรับปรุงปุ่ม Refresh เฉพาะกล่อง) ---
+# --- 🎯 ฟังก์ชัน Pop-up Modal สำหรับจัดการ Alert (ACK, Remark, Incident) ---
+@st.dialog("⚙️ จัดการข้อมูล Alert")
+def open_action_dialog(supabase: Client, item: dict):
+    db_id = item["id"]
+    prob_id = item["problem_id"]
+    internal_id = item.get("internal_id")
+    
+    st.markdown(f"### 📌 รายการ: **[{prob_id}]** {item['problem_name']}")
+    st.markdown("---")
+    
+    # --- Section 1: Acknowledge ---
+    st.subheader("1. Acknowledge Status")
+    if not item.get('ack'):
+        if st.button("✅ ยืนยัน ACK Alert นี้", key=f"dlg_ack_{db_id}", use_container_width=True, type="primary"):
+            try:
+                supabase.table("alarm_comments").update({"ack": "ACKED"}).eq("id", db_id).execute()
+                st.success("บันทึก ACK เรียบร้อย!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+    else:
+        st.info(f"🟢 ACKED แล้วโดย: **{item['ack']}**")
+
+    st.markdown("---")
+
+    # --- Section 2: Remark (Comment) ---
+    st.subheader("2. Remark / Comment (ส่งไป Dynatrace)")
+    with st.form(key=f"dlg_form_remark_{db_id}", clear_on_submit=True):
+        current_remark = item.get('remark') or ""
+        new_remark = st.text_area("กรอกข้อความ Remark ใหม่:", value=current_remark, height=100)
+        btn_remark = st.form_submit_button("🚀 บันทึก Remark ลง Dynatrace & DB", use_container_width=True)
+
+        if btn_remark and new_remark:
+            try:
+                if internal_id:
+                    post_comment_to_dynatrace(internal_id, new_remark)
+                supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
+                st.success("บันทึก Remark เรียบร้อย!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
+
+    st.markdown("---")
+
+    # --- Section 3: Incident Number ---
+    st.subheader("3. Incident Number")
+    with st.form(key=f"dlg_form_inc_{db_id}", clear_on_submit=True):
+        current_inc = item.get('incident') or ""
+        new_inc = st.text_input("กรอกเลข Incident (เช่น INC12345):", value=current_inc)
+        btn_inc = st.form_submit_button("💾 บันทึกเลข Incident", use_container_width=True)
+
+        if btn_inc and new_inc:
+            try:
+                supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
+                st.success("บันทึก Incident เรียบร้อย!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
+
+
+# --- 5. Render หน้า UI (คลีนกล่องให้เรียบหรู + โชว์เฉพาะสถานะสรุป) ---
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
         status_label = "ACTIVE" if is_active_tab else "RESOLVED"
@@ -203,37 +263,66 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
         )
 
-        # 🎯 เช็กว่าปุ่ม Refresh ของกล่องนี้เพิ่งถูกกดหรือไม่ เพื่อตั้งค่าให้ Expander กางค้างไว้
         is_refresh_clicked = st.session_state.get(f"refreshed_{db_id}", False)
         if is_refresh_clicked:
-            st.session_state[f"refreshed_{db_id}"] = False # รีเซ็ต state หลังใช้งาน
+            st.session_state[f"refreshed_{db_id}"] = False
 
         with st.expander(expander_title, expanded=is_refresh_clicked):
-            top_col1, top_col2 = st.columns([3.5, 1.5])
+            # --- แถบปุ่มควบคุมด้านบน ---
+            top_col1, top_col2, top_col3 = st.columns([2.5, 1, 1.5])
+            
             with top_col1:
                 st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
+            
             with top_col2:
-                # 🎯 ปุ่ม Refresh เจาะจงยิงดึงเฉพาะ PID นี้รายการเดียว
+                # 🎯 ปุ่มเปิด Pop-up Modal จัดการข้อมูล (ทำหน้าที่แทนคลิกขวา)
+                if st.button("⚙️ จัดการ / แก้ไข", key=f"btn_manage_{db_id}", use_container_width=True, type="secondary"):
+                    open_action_dialog(supabase, item)
+
+            with top_col3:
+                # ปุ่ม Refresh เฉพาะกล่อง
                 if st.button("🔄 Refresh กล่องนี้", key=f"btn_refresh_{db_id}", use_container_width=True):
-                    with st.spinner("ดึง Comment ล่าสุด..."):
+                    with st.spinner("ดึงข้อมูล..."):
                         if internal_id:
                             fresh_comment = fetch_latest_comment_from_dt(internal_id)
                             if fresh_comment:
-                                # 1. อัปเดตลง DB
                                 supabase.table("alarm_comments").update({"remark": fresh_comment}).eq("id", db_id).execute()
-                                # 2. อัปเดตข้อมูลใน Object memory ทันที
                                 item['remark'] = fresh_comment
                                 st.toast(f"✅ อัปเดต Comment ของ [{prob_id}] สำเร็จ!", icon="🎉")
                             else:
-                                st.toast(f"ℹ️ ไม่พบ Comment ใหม่ใน Dynatrace", icon="🔍")
-                    
-                    # บันทึก state ให้กล่องกางค้างไว้หลัง Re-run
+                                st.toast(f"ℹ️ ไม่พบ Comment ใหม่", icon="🔍")
                     st.session_state[f"refreshed_{db_id}"] = True
                     st.rerun()
 
+            st.markdown("---")
+
+            # --- ส่วนแสดงสถานะสรุป (ACK / INCIDENT / REMARK) ---
+            st.markdown("📊 **สรุปสถานะการดำเนินการ:**")
+            st_col1, st_col2, st_col3 = st.columns(3)
+            
+            with st_col1:
+                if item.get('ack'):
+                    st.success(f"✅ **ACK แล้ว:** `{item['ack']}`")
+                else:
+                    st.warning("⚠️ **ยังไม่ได้ ACK**")
+
+            with st_col2:
+                if item.get('incident'):
+                    st.success(f"📌 **Incident:** `{item['incident']}`")
+                else:
+                    st.warning("⚠️ **ยังไม่มี Incident**")
+
+            with st_col3:
+                if item.get('remark'):
+                    st.success("💬 **มี Remark แล้ว**")
+                else:
+                    st.warning("⚠️ **ยังไม่มี Remark**")
+
+            st.markdown("---")
+
+            # --- ส่วนแสดงรายละเอียดข้อมูล Alert ---
             col_a, col_b, col_c, col_d = st.columns([1.5, 2, 2, 2])
             with col_a:
-                st.write(f"**Ack:** `{item['ack'] if item['ack'] else '-'}`")
                 st.write(f"**Status:** {item['status']}")
             with col_b:
                 st.write(f"**Services:** {item['services']}")
@@ -243,65 +332,16 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 st.write(f"**Duration:** {item['duration']}")
             with col_d:
                 st.write(f"**Resolve Date:** {item['resolve_date'] if item['resolve_date'] else '-'}")
-                st.write(f"**Incident:** `{item['incident'] if item['incident'] else '-'}`")
 
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             
+            # แสดงเนื้อหา Remark (ถ้ามี)
             remark_text = item['remark'] if item['remark'] else '-'
-            st.markdown(f"**Remark (Comment):**\n```\n{remark_text}\n```")
+            st.markdown(f"**Remark (Comment ล่าสุด):**\n```\n{remark_text}\n```")
             
             if internal_id:
                 dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
                 st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
-
-            st.markdown("---")
-
-            # Actions
-            st.markdown("🛠️ **แก้ไขข้อมูลบน Dashboard:**")
-            action_col1, action_col2, action_col3 = st.columns([1, 2, 2])
-
-            with action_col1:
-                st.write("**1. Acknowledge**")
-                if not item['ack']:
-                    if st.button("✅ ACK Alert", key=f"btn_ack_{db_id}", use_container_width=True):
-                        try:
-                            supabase.table("alarm_comments").update({"ack": "Test"}).eq("id", db_id).execute()
-                            st.success("บันทึก Ack เรียบร้อย!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"เกิดข้อผิดพลาด: {str(e)}")
-                else:
-                    st.info(f"ACKED โดย: {item['ack']}")
-
-            with action_col2:
-                st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
-                with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
-                    new_remark = st.text_area("กรอก Remark / Comment:", key=f"input_remark_{db_id}", height=100)
-                    btn_remark = st.form_submit_button("🚀 บันทึก Remark")
-
-                    if btn_remark and new_remark:
-                        try:
-                            if internal_id:
-                                post_comment_to_dynatrace(internal_id, new_remark)
-                            supabase.table("alarm_comments").update({"remark": new_remark}).eq("id", db_id).execute()
-                            st.success("บันทึก Remark เรียบร้อย!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
-
-            with action_col3:
-                st.write("**3. Incident Number (อัปเดต DB)**")
-                with st.form(key=f"form_incident_{db_id}", clear_on_submit=True):
-                    new_inc = st.text_input("กรอกเลข Incident:", key=f"input_inc_{db_id}")
-                    btn_inc = st.form_submit_button("💾 บันทึก Incident")
-
-                    if btn_inc and new_inc:
-                        try:
-                            supabase.table("alarm_comments").update({"incident": new_inc}).eq("id", db_id).execute()
-                            st.success("บันทึก Incident เรียบร้อย!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"เกิดข้อผิดพลาดในการลง DB: {str(e)}")
 
 # --- 6. Main App ---
 def run_app():
