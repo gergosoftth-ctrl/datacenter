@@ -51,6 +51,12 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=4)
+        print(f"----------------------------------------")
+        print(f"🐛 [DEBUG] Fetching Comment for PID: {internal_id}")
+        print(f"🐛 [DEBUG] Status Code: {res.status_code}")
+        print(f"🐛 [DEBUG] Response JSON: {res.text}")
+        print(f"----------------------------------------")
+        
         if res.status_code == 200:
             data = res.json()
             comments = data.get("comments", [])
@@ -60,8 +66,8 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
                 msg = latest.get("message", "").strip()
                 if msg:
                     return f"[{author}]: {msg}" if author and author != "User" else msg
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"❌ [DEBUG ERROR]: {e}")
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
