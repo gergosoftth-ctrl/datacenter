@@ -22,7 +22,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงข้อมูลสดจาก Dynatrace API ---
+# --- 1. ดึงรายการ Problems ทั้งหมดจาก Dynatrace API ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -44,8 +44,9 @@ def fetch_dynatrace_problems():
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
-# --- 2. ดึง Comment ล่าสุดจาก Dynatrace แบบเจาะจง ID ---
+# --- 2. ดึง Comment ล่าสุดเจาะจง Problem ID (รวมทุก User/System) ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
+    """ ดึง Comment ล่าสุดจาก Dynatrace Problem API โดยตรง ไม่ว่าใครจะเป็นคนเม้นต์ """
     if not internal_id:
         return None
     dt_url = get_dt_base_url()
@@ -58,12 +59,15 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
         if res.status_code == 200:
             comments = res.json().get("comments", [])
             if comments:
-                return comments[-1].get("message")
+                latest = comments[-1]
+                author = latest.get("authorName", "Unknown")
+                msg = latest.get("message", "")
+                return f"[{author}]: {msg}" if author != "Unknown" else msg
     except Exception:
         pass
     return None
 
-# --- 3. ยิง Comment กลับไปหา Dynatrace ---
+# --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
 def post_comment_to_dynatrace(problem_id: str, comment_text: str):
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -144,16 +148,11 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        dt_comments = prob.get("comments", [])
-        latest_dt_comment = dt_comments[-1].get("message") if dt_comments else None
-
         try:
             existing = supabase.table("alarm_comments").select("id, status, remark").eq("problem_id", display_id).execute().data
 
             if not existing:
-                if not latest_dt_comment and internal_id:
-                    latest_dt_comment = fetch_latest_comment_from_dt(internal_id)
-
+                latest_comment = fetch_latest_comment_from_dt(internal_id)
                 db_payload = {
                     "type": "Dynatrace",
                     "problem_id": display_id,
@@ -166,7 +165,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                     "duration": duration_str,
                     "resolve_date": resolve_dt_str if end_ms > 0 else None,
                     "ack": None,
-                    "remark": latest_dt_comment,
+                    "remark": latest_comment,
                     "incident": None
                 }
                 supabase.table("alarm_comments").insert(db_payload).execute()
@@ -179,18 +178,17 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
-                # หากสถานะเปลี่ยนเป็น RESOLVED ให้ไปดึง Comment ล่าสุดจาก Dynatrace ลง DB
+                # 🎯 เมื่อสถานะเป็น RESOLVED ให้ไปเจาะจงดึง Comment ล่าสุดจาก Dynatrace ลง DB
                 if dt_status == "RESOLVED":
-                    if not latest_dt_comment and internal_id:
-                        latest_dt_comment = fetch_latest_comment_from_dt(internal_id)
-                    if latest_dt_comment:
-                        update_payload["remark"] = latest_dt_comment
+                    latest_comment = fetch_latest_comment_from_dt(internal_id)
+                    if latest_comment:
+                        update_payload["remark"] = latest_comment
 
                 supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
         except Exception:
             continue
 
-    # 4.2 เคลียร์เคสค้างใน DB ที่ Dynatrace ปิดไปแล้ว
+    # 4.2 เคลียร์เคสค้างใน DB ที่ปิดไปแล้วใน Dynatrace
     try:
         active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
         for db_item in active_in_db:
@@ -285,7 +283,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
             with action_col2:
                 st.write("**2. Remark (อัปเดต DB & Dynatrace)**")
                 with st.form(key=f"form_remark_{db_id}", clear_on_submit=True):
-                    # ใช้ st.text_area ให้พิมพ์หลายบรรทัดได้
                     new_remark = st.text_area("กรอก Remark / Comment (กด Enter ขึ้นบรรทัดใหม่ได้):", key=f"input_remark_{db_id}", height=100)
                     btn_remark = st.form_submit_button("🚀 บันทึก Remark")
 
@@ -318,7 +315,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
 
-    # 🎯 ปรับตั้งเวลา Auto Refresh เป็นทุกๆ 30 วินาที (30,000 ms)
+    # 🎯 ตั้งเวลา Auto Refresh ทุกๆ 30 วินาที (30,000 ms)
     st_autorefresh(interval=30000, key="dt_dashboard_auto_refresh")
 
     try:
