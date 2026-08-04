@@ -40,6 +40,7 @@ def fetch_dynatrace_problems():
         return []
 
 # --- 2. ดึง Comment ล่าสุดยิงตรงไปที่ Endpoint /comments ---
+# --- 🎯 [แก้ไขเรียบร้อย] ดึง Key "content" และดึง Comment ล่าสุดจาก Index [0] ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
     if not internal_id:
         return None
@@ -51,23 +52,22 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=4)
-        print(f"----------------------------------------")
-        print(f"🐛 [DEBUG] Fetching Comment for PID: {internal_id}")
-        print(f"🐛 [DEBUG] Status Code: {res.status_code}")
-        print(f"🐛 [DEBUG] Response JSON: {res.text}")
-        print(f"----------------------------------------")
-        
         if res.status_code == 200:
             data = res.json()
             comments = data.get("comments", [])
             if comments:
-                latest = comments[-1]
+                # 🎯 1. Dynatrace เรียง Comment ใหม่ล่าสุดไว้ตัวแรกเสมอ (comments[0])
+                latest = comments[0] 
+                
                 author = latest.get("authorName") or latest.get("author") or "User"
-                msg = latest.get("message", "").strip()
+                
+                # 🎯 2. ใช้ .get("content") แทน .get("message") ตาม Payload จริงจาก API
+                msg = latest.get("content", "").strip() 
+                
                 if msg:
                     return f"[{author}]: {msg}" if author and author != "User" else msg
     except Exception as e:
-        print(f"❌ [DEBUG ERROR]: {e}")
+        print(f"Error fetching comments for {internal_id}: {e}")
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
