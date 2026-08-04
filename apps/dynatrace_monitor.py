@@ -22,7 +22,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงรายการ Problems ย้อนหลัง 1 ชม. ---
+# --- 1. ดึงรายการ Problems จาก Dynatrace API ย้อนหลัง 1 ชั่วโมง ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -39,7 +39,7 @@ def fetch_dynatrace_problems():
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
-# --- 2. ดึง Comment ล่าสุด ---
+# --- 2. ดึง Comment ล่าสุดจาก Dynatrace (เอาเฉพาะข้อความ ไม่เอาชื่อคน) ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
     if not internal_id:
         return None
@@ -55,8 +55,8 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
             data = res.json()
             comments = data.get("comments", [])
             if comments:
-                latest = comments[0] 
-                msg = latest.get("content", "").strip() 
+                latest = comments[0] # Dynatrace เรียง Comment ใหม่สุดไว้ตัวแรกเสมอ
+                msg = latest.get("content", "").strip() # ดึงจาก key "content"
                 if msg:
                     return msg
     except Exception:
@@ -143,6 +143,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
+        # ดึง Comment ล่าสุดสดๆ จาก Dynatrace
         latest_comment = fetch_latest_comment_from_dt(internal_id)
 
         try:
@@ -181,21 +182,42 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-# --- 🎯 Pop-up Context Menu (สไตล์ Windows Right-Click Menu) ---
-@st.dialog("🖱️ Windows Context Menu - จัดการ Alert")
+# --- 🎯 Pop-up Context Menu (เมื่อคลิกขวาที่ Title) ---
+@st.dialog("🖱️ Context Menu - จัดการ Alert")
 def open_action_dialog(supabase: Client, item: dict):
     db_id = item["id"]
     prob_id = item["problem_id"]
     internal_id = item.get("internal_id")
+    current_status = item.get("status", "ACTIVE")
     
     st.markdown(f"### 📌 **[{prob_id}]** {item['problem_name']}")
-    st.caption("เลือก Action ที่ต้องการดำเนินการกับ Alert รายการนี้:")
+    st.caption(f"Service: {item.get('services', '-')} | Status ปัจจุบัน: **{current_status}**")
     st.markdown("---")
     
-    # 1. Acknowledge
-    st.markdown("##### 1️⃣ Acknowledge Action")
+    # 1. Clear Alert Status (เปลี่ยนเป็น RESOLVED)
+    st.markdown("##### 🧹 1. Clear Alert Status")
+    if current_status == "ACTIVE":
+        if st.button("🔴 🟢 สั่ง Clear Alert นี้ (เปลี่ยนเป็น RESOLVED)", key=f"dlg_clear_{db_id}", use_container_width=True, type="primary"):
+            try:
+                now_str = datetime.now(TZ_TH).strftime('%b %d %H:%M')
+                supabase.table("alarm_comments").update({
+                    "status": "RESOLVED",
+                    "resolve_date": now_str
+                }).eq("id", db_id).execute()
+                
+                st.toast(f"🧹 เคลียร์สถานะ [{prob_id}] เป็น RESOLVED เรียบร้อย!", icon="✅")
+                st.rerun()
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการ Clear: {str(e)}")
+    else:
+        st.info("🟢 Alert นี้มีสถานะเป็น **RESOLVED** เรียบร้อยแล้ว")
+
+    st.markdown("---")
+
+    # 2. Acknowledge Action
+    st.markdown("##### ✅ 2. Acknowledge Action")
     if not item.get('ack'):
-        if st.button("✅ ยืนยัน ACK Alert", key=f"dlg_ack_{db_id}", use_container_width=True, type="primary"):
+        if st.button("✅ ยืนยัน ACK Alert", key=f"dlg_ack_{db_id}", use_container_width=True):
             try:
                 supabase.table("alarm_comments").update({"ack": "ACKED"}).eq("id", db_id).execute()
                 st.toast(f"✅ บันทึก ACK ให้กับ [{prob_id}] เรียบร้อย!", icon="🎉")
@@ -203,12 +225,12 @@ def open_action_dialog(supabase: Client, item: dict):
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาด: {str(e)}")
     else:
-        st.info(f"🟢 สถานะ: **ACKED** เรียบร้อยแล้ว (`{item['ack']}`)")
+        st.info(f"🟢 สถานะ: **ACKED** แล้ว (`{item['ack']}`)")
 
     st.markdown("---")
 
-    # 2. Incident Number
-    st.markdown("##### 2️⃣ Incident Management")
+    # 3. Incident Management
+    st.markdown("##### 📌 3. Incident Management")
     with st.form(key=f"dlg_form_inc_{db_id}", clear_on_submit=True):
         current_inc = item.get('incident') or ""
         new_inc = st.text_input("เลข Incident:", value=current_inc, placeholder="เช่น INC1234567")
@@ -224,11 +246,11 @@ def open_action_dialog(supabase: Client, item: dict):
 
     st.markdown("---")
 
-    # 3. Remark / Comment
-    st.markdown("##### 3️⃣ Add Remark (ยิงไป Dynatrace)")
+    # 4. Remark / Comment (ส่งลง Dynatrace)
+    st.markdown("##### 💬 4. Add Remark (ยิงไป Dynatrace)")
     with st.form(key=f"dlg_form_remark_{db_id}", clear_on_submit=True):
         current_remark = item.get('remark') or ""
-        new_remark = st.text_area("กรอกข้อความ Remark:", value=current_remark, height=90, placeholder="พิมพ์รายละเอียดที่นี่...")
+        new_remark = st.text_area("กรอกข้อความ Remark:", value=current_remark, height=90, placeholder="พิมพ์รายละเอียด...")
         btn_remark = st.form_submit_button("🚀 บันทึก Remark ลง Dynatrace & DB", use_container_width=True)
 
         if btn_remark and new_remark:
@@ -242,7 +264,7 @@ def open_action_dialog(supabase: Client, item: dict):
                 st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
 
-# --- 5. Render หน้า UI (คลีนเหลือเฉพาะ ACK / INCIDENT และปุ่ม Context Menu) ---
+# --- 5. Render หน้า UI ---
 def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
     if not items:
         status_label = "ACTIVE" if is_active_tab else "RESOLVED"
@@ -259,31 +281,29 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
         ack_prefix = f"[ACK: {item['ack']}] " if item.get('ack') else ""
         inc_prefix = f"[INC: {item['incident']}] " if item.get('incident') else ""
         
-        expander_title = (
-            f"{status_color} {type_tag} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
-            f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
-        )
+        # 🎯 แถบ Title ด้านนอกที่ให้กดเปิด Context Menu ได้ทันทีโดยไม่ต้องเข้ากล่อง
+        title_col1, title_col2 = st.columns([8.5, 1.5])
+        
+        with title_col1:
+            expander_title = (
+                f"{status_color} {type_tag} {ack_prefix}{inc_prefix}**[{prob_id}]** {item['problem_name']} | "
+                f"Service: {item['services']} | Impact: {item.get('impact', '-')}"
+            )
+        
+        with title_col2:
+            # 🎯 ปุ่มเปิด Context Menu (Clear, ACK, Inc, Remark)
+            if st.button("🖱️ คลิกขวา", key=f"btn_title_ctx_{db_id}", use_container_width=True, type="secondary"):
+                open_action_dialog(supabase, item)
 
-        is_refresh_clicked = st.session_state.get(f"refreshed_{db_id}", False)
-        if is_refresh_clicked:
-            st.session_state[f"refreshed_{db_id}"] = False
-
-        with st.expander(expander_title, expanded=is_refresh_clicked):
-            # --- แถบปุ่มควบคุม Context Menu ---
-            top_col1, top_col2, top_col3 = st.columns([2.5, 1.3, 1.2])
-            
+        # กล่องรายละเอียดเพิ่มเติม
+        with st.expander(expander_title, expanded=False):
+            top_col1, top_col2 = st.columns([4, 1])
             with top_col1:
                 st.write(f"**Type:** `{item.get('type', 'Dynatrace')}`")
-            
             with top_col2:
-                # 🎯 ปุ่มทำหน้าที่แทนการคลิกขวา (Windows Context Menu)
-                if st.button("🖱️ คลิกขวา / เมนู", key=f"btn_ctx_{db_id}", use_container_width=True, type="primary"):
-                    open_action_dialog(supabase, item)
-
-            with top_col3:
                 # ปุ่ม Refresh เฉพาะกล่องนี้
-                if st.button("🔄 Refresh กล่องนี้", key=f"btn_refresh_{db_id}", use_container_width=True):
-                    with st.spinner("กำลังอัปเดต..."):
+                if st.button("🔄 Refresh", key=f"btn_refresh_{db_id}", use_container_width=True):
+                    with st.spinner("อัปเดต..."):
                         if internal_id:
                             fresh_comment = fetch_latest_comment_from_dt(internal_id)
                             if fresh_comment:
@@ -291,15 +311,13 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                                 item['remark'] = fresh_comment
                                 st.toast(f"✅ อัปเดต Comment ของ [{prob_id}] สำเร็จ!", icon="🎉")
                             else:
-                                st.toast(f"ℹ️ ไม่พบ Comment ใหม่", icon="🔍")
-                    st.session_state[f"refreshed_{db_id}"] = True
+                                st.toast("ℹ️ ไม่พบ Comment ใหม่", icon="🔍")
                     st.rerun()
 
             st.markdown("---")
 
-            # --- ส่วนแสดงสถานะสรุป (ตัด Remark ออก เหลือแค่ ACK / INCIDENT) ---
+            # แสดงสถานะสรุป ACK / INCIDENT (เอา Remark ออกตามสั่ง)
             st_col1, st_col2 = st.columns(2)
-            
             with st_col1:
                 if item.get('ack'):
                     st.success(f"✅ **ACKED:** `{item['ack']}`")
@@ -314,7 +332,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.markdown("---")
 
-            # --- รายละเอียดข้อมูล Alert ---
+            # รายละเอียดข้อมูล Alert
             col_a, col_b, col_c, col_d = st.columns([1.5, 2, 2, 2])
             with col_a:
                 st.write(f"**Status:** {item['status']}")
@@ -329,7 +347,7 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 
             st.write(f"**Impact:** `{item.get('impact', '-')}`")
             
-            # ช่องแสดง Remark (Comment) แบบดั้งเดิม
+            # ช่องแสดง Remark (Comment)
             remark_text = item['remark'] if item['remark'] else '-'
             st.markdown(f"**Remark (Comment ล่าสุด):**\n```\n{remark_text}\n```")
             
@@ -341,7 +359,6 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
 
-    # 🎯 ใช้ Auto Refresh ทุกๆ 30 วินาที เฉพาะเวลานั่งดูหน้าจอปกติ
     st_autorefresh(interval=30000, key="dt_dashboard_auto_refresh")
 
     try:
@@ -376,6 +393,7 @@ def run_app():
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
         raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
         
+        # กรองเฉพาะรายการ Resolved ที่ Start Date จนถึงปัจจุบัน ไม่เกิน 1 ชั่วโมง
         resolved_res = [item for item in raw_resolved if is_start_within_last_1_hour(item.get("start_date"))]
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
