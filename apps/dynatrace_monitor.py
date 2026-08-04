@@ -40,7 +40,7 @@ def fetch_dynatrace_problems():
         return []
 
 # --- 2. ดึง Comment ล่าสุดยิงตรงไปที่ Endpoint /comments ---
-# --- 🎯 [แก้ไขเรียบร้อย] ดึง Key "content" และดึง Comment ล่าสุดจาก Index [0] ---
+# --- 🎯 [แก้ไข] ดึง Comment ล่าสุดจาก Index [0] และเอาเฉพาะข้อความ ไม่เอาชื่อคน ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
     if not internal_id:
         return None
@@ -56,16 +56,14 @@ def fetch_latest_comment_from_dt(internal_id: str) -> str:
             data = res.json()
             comments = data.get("comments", [])
             if comments:
-                # 🎯 1. Dynatrace เรียง Comment ใหม่ล่าสุดไว้ตัวแรกเสมอ (comments[0])
+                # 🎯 Dynatrace เรียง Comment ใหม่ล่าสุดไว้ตัวแรกเสมอ (comments[0])
                 latest = comments[0] 
                 
-                author = latest.get("authorName") or latest.get("author") or "User"
-                
-                # 🎯 2. ใช้ .get("content") แทน .get("message") ตาม Payload จริงจาก API
+                # 🎯 ดึงเฉพาะ "content" ตาม Payload จริงจาก API
                 msg = latest.get("content", "").strip() 
                 
                 if msg:
-                    return f"[{author}]: {msg}" if author and author != "User" else msg
+                    return msg # 🎯 Return แค่ข้อความเพียวๆ ไม่ต้องพ่วง [authorName] 
     except Exception as e:
         print(f"Error fetching comments for {internal_id}: {e}")
     return None
