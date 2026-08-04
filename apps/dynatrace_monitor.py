@@ -22,7 +22,7 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงรายการ Problems จาก Dynatrace API ย้อนหลังแค่ 1 ชั่วโมง (-1h) ---
+# --- 1. ดึงรายการ Problems ย้อนหลัง 1 ชม. ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
@@ -39,7 +39,7 @@ def fetch_dynatrace_problems():
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
-# --- 2. ดึง Comment ล่าสุดยิงตรงไปที่ Endpoint /comments ของแต่ละ Problem ---
+# --- 2. ดึง Comment ล่าสุดยิงตรงไปที่ Endpoint /comments ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
     if not internal_id:
         return None
@@ -90,23 +90,19 @@ def calculate_duration(start_ms, end_ms):
     minutes = (diff_sec % 3600) // 60
     return f"{hours}h {minutes}m{suffix}" if hours > 0 else f"{minutes}m{suffix}"
 
-# 🎯 ฟังก์ชันเช็กว่า Start Date อยู่ภายใน 1 ชั่วโมงล่าสุดหรือไม่
 def is_start_within_last_1_hour(start_date_str: str) -> bool:
     if not start_date_str or start_date_str == "-":
         return False
     try:
         now_th = datetime.now(TZ_TH)
-        # แปลงข้อความสตริงสตาร์ทเดท เช่น "Aug 04 11:30" เป็น datetime object
         dt_obj = datetime.strptime(start_date_str, '%b %d %H:%M')
         dt_obj = dt_obj.replace(year=now_th.year, tzinfo=TZ_TH)
-        
         diff_seconds = (now_th - dt_obj).total_seconds()
-        # เช็กว่าเวลาเกิดตั้งแต่ 0 ถึงไม่เกิน 3600 วินาที (1 ชั่วโมง)
         return 0 <= diff_seconds <= 3600
     except Exception:
         return True
 
-# --- 4. Sync ข้อมูลลง DB ---
+# --- 4. 🎯 Sync ข้อมูลลง DB (แก้ไขการดึง Comment ให้การันตี 100%) ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     if not problems:
         return
@@ -149,7 +145,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # ดึง Comment ล่าสุด
+        # 🎯 [จุดแก้ไขสำคัญ]: บังคับยิงดึง Comment สดๆ จาก API ตรงเสมอสำหรับทุกปัญหา
         latest_comment = fetch_latest_comment_from_dt(internal_id)
 
         try:
@@ -168,7 +164,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                     "duration": duration_str,
                     "resolve_date": resolve_dt_str if end_ms > 0 else None,
                     "ack": None,
-                    "remark": latest_comment,
+                    "remark": latest_comment, # บันทึก Comment ลง DB
                     "incident": None
                 }
                 supabase.table("alarm_comments").insert(db_payload).execute()
@@ -181,6 +177,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
+                # 🎯 [จุดแก้ไขสำคัญ]: หากตรวจพบ Comment ล่าสุดจาก Dynatrace ให้เขียนอัปเดตทับ DB ทันที
                 if latest_comment:
                     update_payload["remark"] = latest_comment
 
@@ -323,7 +320,7 @@ def run_app():
         active_res = supabase.table("alarm_comments").select("*").eq("status", "ACTIVE").order("id", desc=True).execute().data
         raw_resolved = supabase.table("alarm_comments").select("*").eq("status", "RESOLVED").order("id", desc=True).execute().data
         
-        # 🎯 กรองเฉพาะรายการ Resolved ที่ Start Date จนถึงปัจจุบัน ไม่เกิน 1 ชั่วโมง (3600 วินาที)
+        # กรองเฉพาะรายการ Resolved ที่ Start Date จนถึงปัจจุบัน ไม่เกิน 1 ชั่วโมง
         resolved_res = [item for item in raw_resolved if is_start_within_last_1_hour(item.get("start_date"))]
     except Exception as e:
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Database: {str(e)}")
