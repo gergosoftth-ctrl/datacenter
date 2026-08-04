@@ -22,21 +22,22 @@ def get_dt_base_url():
         return f"https://{tenant_id}.live.dynatrace.com"
     return raw_url
 
-# --- 1. ดึงรายการ Problems ทั้งหมดจาก Dynatrace API ---
+# --- 1. ดึงรายการ Problems พร้อม Comments ใน Payload เดียว ---
 def fetch_dynatrace_problems():
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
     
-    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100&fields=displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
+    # 🎯 เพิ่ม fields=comments มาใน Request รวมทีเดียวเพื่อลดจำนวน Request
+    endpoint = f"{dt_url}/api/v2/problems?from=-24h&pageSize=100&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
     
     try:
-        res = requests.get(endpoint, headers=headers, timeout=10)
+        res = requests.get(endpoint, headers=headers, timeout=12)
         if res.status_code == 200:
             return res.json().get("problems", [])
         
-        fallback_endpoint = f"{dt_url}/api/v2/problems?pageSize=50"
-        res_fb = requests.get(fallback_endpoint, headers=headers, timeout=10)
+        fallback_endpoint = f"{dt_url}/api/v2/problems?pageSize=50&fields=comments,displayId,problemId,title,status,startTime,endTime,managementZones,impactedEntities"
+        res_fb = requests.get(fallback_endpoint, headers=headers, timeout=12)
         if res_fb.status_code == 200:
             return res_fb.json().get("problems", [])
         return []
@@ -44,38 +45,28 @@ def fetch_dynatrace_problems():
         st.warning(f"⚠️ ไม่สามารถเชื่อมต่อ Dynatrace API ได้ชั่วคราว: {str(e)}")
         return []
 
-# --- 2. 🎯 [จุดแก้ไขสำคัญ] ดึง Comment ล่าสุดยิงตรงไปที่ /comments Endpoint ---
-# --- 🎯 ฟังก์ชันดึง Comment ล่าสุดฉบับแก้ไขสมบูรณ์ ---
+# --- 2. ดึง Comment ล่าสุดจาก Dynatrace API แบบเจาะจง ID (Fallback) ---
 def fetch_latest_comment_from_dt(internal_id: str) -> str:
-    """ ดึง Comment ล่าสุดจาก Dynatrace v2 โดยยิงไปที่ /comments Endpoint ตรงๆ """
     if not internal_id:
         return None
     dt_url = get_dt_base_url()
     token = st.secrets["dynatrace"]["API_TOKEN"]
     headers = {"Authorization": f"Api-Token {token}", "Content-Type": "application/json"}
-    
-    # ⚡ ยิงไปที่ Sub-resource /comments โดยตรง
     endpoint = f"{dt_url}/api/v2/problems/{internal_id}/comments"
     
     try:
         res = requests.get(endpoint, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            
-            # (ลบ Debug ออกแล้ว แต่ถ้าอยากดู JSON ให้ใช้อันนี้)
-            # st.json(data)
-            
             comments = data.get("comments", [])
             if comments:
-                # คว้า Comment ตัวสุดท้ายใน Array (ล่าสุดเสมอ)
                 latest = comments[-1]
                 author = latest.get("authorName") or latest.get("author") or "User"
                 msg = latest.get("message", "").strip()
-                
                 if msg:
-                    return f"[{author}]: {msg}" if author != "User" else msg
-    except Exception as e:
-        print(f"Error fetching comments for {internal_id}: {e}")
+                    return f"[{author}]: {msg}" if author and author != "User" else msg
+    except Exception:
+        pass
     return None
 
 # --- 3. ยิง Comment จาก Dashboard กลับไป Dynatrace ---
@@ -116,7 +107,7 @@ def is_within_last_1_hour(start_date_str: str) -> bool:
     except Exception:
         return True
 
-# --- 4. Sync ข้อมูลลง DB โดยดึง Comment ล่าสุดใส่ลง DB เสมอ ---
+# --- 4. Sync ข้อมูลลง DB โดยนำ Comment ล่าสุดใส่ช่อง remark เสมอ ---
 def sync_dynatrace_to_db(supabase: Client, problems: list):
     if not problems:
         return
@@ -137,6 +128,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 open_problem_ids.add(display_id)
                 open_problem_ids.add(internal_id)
 
+    # 4.1 บันทึกรายการใหม่ หรือ อัปเดตรายการเดิมใน DB
     for prob in unique_problems:
         internal_id = prob.get("problemId")
         display_id = prob.get("displayId", f"P-{internal_id}")
@@ -158,8 +150,17 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         impacted_list = [ent.get("name") for ent in prob.get("impactedEntities", [])] if prob.get("impactedEntities") else []
         impact_str = ", ".join(impacted_list) if impacted_list else "-"
 
-        # 🎯 ดึง Comment ล่าสุดจาก Endpoint /comments สดๆ
-        latest_comment = fetch_latest_comment_from_dt(internal_id)
+        # 🎯 ดึง Comment จาก Payload หลักก่อน ถ้าไม่มีค่อยยิงเจาะจง
+        dt_comments = prob.get("comments", [])
+        latest_comment = None
+        if dt_comments:
+            latest_obj = dt_comments[-1]
+            author = latest_obj.get("authorName") or latest_obj.get("author") or "User"
+            msg = latest_obj.get("message", "").strip()
+            if msg:
+                latest_comment = f"[{author}]: {msg}" if author and author != "User" else msg
+        else:
+            latest_comment = fetch_latest_comment_from_dt(internal_id)
 
         try:
             existing = supabase.table("alarm_comments").select("id, status, remark").eq("problem_id", display_id).execute().data
@@ -190,7 +191,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
-                # 🎯 หากเจอมันมี Comment ใน Dynatrace ให้อัปเดตลง DB ทันที
+                # 🎯 หากพบ Comment ใน Dynatrace ให้อัปเดตลง DB ทันที
                 if latest_comment:
                     update_payload["remark"] = latest_comment
 
@@ -198,7 +199,7 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
         except Exception:
             continue
 
-    # เคลียร์เคสค้างใน DB ที่ปิดไปแล้วใน Dynatrace
+    # 4.2 เคลียร์เคสค้างใน DB ที่ปิดไปแล้วใน Dynatrace
     try:
         active_in_db = supabase.table("alarm_comments").select("problem_id, internal_id").eq("status", "ACTIVE").eq("type", "Dynatrace").execute().data
         for db_item in active_in_db:
