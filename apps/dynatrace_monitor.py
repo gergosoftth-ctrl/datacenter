@@ -153,7 +153,8 @@ def sync_dynatrace_to_db(supabase: Client, problems: list):
                 if end_ms > 0:
                     update_payload["resolve_date"] = resolve_dt_str
                 
-                if dt_status == "RESOLVED" and latest_dt_comment and not existing[0].get("remark"):
+                # ถ้ารายการกลายเป็น RESOLVED และมี Comment ใน Dynatrace ให้ดึง Comment ล่าสุดมาลง DB ทันที
+                if dt_status == "RESOLVED" and latest_dt_comment:
                     update_payload["remark"] = latest_dt_comment
 
                 supabase.table("alarm_comments").update(update_payload).eq("problem_id", display_id).execute()
