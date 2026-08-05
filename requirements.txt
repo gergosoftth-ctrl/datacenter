@@ -3,4 +3,3 @@ requests
 pandas
 pytz
 supabase
-streamlit-autorefresh
