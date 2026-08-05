@@ -355,11 +355,17 @@ def render_alarm_list(supabase: Client, items: list, is_active_tab: bool):
                 dt_portal_link = f"https://lss67296.apps.dynatrace.com/ui/apps/dynatrace.classic.problems/#problems/problemdetails;gtf=-2h;gf=all;pid={internal_id}"
                 st.markdown(f"🔗 [เปิดดูรายละเอียดบน Dynatrace UI]({dt_portal_link})")
 
-# --- 6. Main App ---
+# --- 6. Main App (ใช้ Native HTML Auto-Refresh แทน streamlit_autorefresh) ---
 def run_app():
     st.title("🚨 Real-time Alarm Management Center")
 
-    st_autorefresh(interval=30000, key="dt_dashboard_auto_refresh")
+    # 🎯 ใช้ HTML Meta Refresh ทุกๆ 30 วินาที เสถียร 100% ไม่ติดปัญหา Component Load
+    st.markdown(
+        """
+        <meta http-equiv="refresh" content="30">
+        """,
+        unsafe_allow_html=True
+    )
 
     try:
         supabase = init_supabase()
@@ -371,7 +377,7 @@ def run_app():
 
     col_info, col_btn = st.columns([3, 1])
     with col_info:
-        st.caption(f"⚡ **Dynatrace Live Sync Active** (Auto 30s) | เวลาปัจจุบัน: `{now_time_str}`")
+        st.caption(f"⚡ **Dynatrace Live Sync Active** (Auto Refresh 30s) | เวลาปัจจุบัน: `{now_time_str}`")
     with col_btn:
         if st.button("🔄 ⚡ บังคับ Sync ทั้งหมด", type="primary", use_container_width=True):
             with st.spinner("กำลังดึง Alert ล่าสุดจาก Dynatrace..."):
