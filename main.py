@@ -226,15 +226,20 @@ async def async_load_alarm_data():
 # 🟢 COMMON HEADER
 # ==========================================
 def render_header():
+    dark_mode = ui.dark_mode()
     with ui.header().classes('bg-slate-800 text-white justify-between items-center px-6 py-2'):
         with ui.row().classes('items-center gap-3'):
             ui.icon('space_dashboard', size='md')
             ui.label("IT Operations Center").classes('text-xl font-bold')
         
-        with ui.row().classes('gap-2'):
+        with ui.row().classes('items-center gap-2'):
             ui.button('🚨 Alarm Monitor', on_click=lambda: ui.navigate.to('/')).props('flat color=white')
             ui.button('🧹 Text Cleaner', on_click=lambda: ui.navigate.to('/cleaner')).props('flat color=white')
             ui.button('📦 กล่องงานฝาก', on_click=lambda: ui.navigate.to('/handover')).props('flat color=white')
+            ui.separator().props('vertical color=slate-600').classes('mx-2')
+            ui.button(icon='light_mode', on_click=dark_mode.toggle).props('flat round color=white').bind_icon_from(
+                dark_mode, 'value', lambda v: 'dark_mode' if v else 'light_mode'
+            ).tooltip('สลับ Dark / Light Mode')
 
 # ==========================================
 # 📌 PAGE 1: ALARM MONITOR (หน้าหลัก)
@@ -250,14 +255,10 @@ def alarm_page():
         render_alarm_lists.refresh()
         spinner.visible = False
 
-    async def auto_refresh_page():
-        await async_load_alarm_data()
-        render_alarm_lists.refresh()
-
     with ui.column().classes('w-full p-6'):
         with ui.row().classes('w-full justify-between items-center mb-4'):
             with ui.row().classes('items-center gap-2'):
-                ui.label("🚨 Real-time Alarm Management").classes('text-2xl font-bold text-slate-800')
+                ui.label("🚨 Real-time Alarm Management").classes('text-2xl font-bold dark:text-white text-slate-800')
                 spinner = ui.spinner(size='lg').props('color=primary')
                 spinner.visible = False
             ui.button('🔄 Sync ทั้งหมด', on_click=manual_refresh).props('type=primary icon=refresh')
@@ -268,7 +269,7 @@ def alarm_page():
                 t_active = ui.tab(f"🔴 Active ({len(state['active_items'])})")
                 t_resolved = ui.tab(f"🟢 Resolved ({len(state['resolved_items'])})")
 
-            with ui.tab_panels(tabs, value=t_active).classes('w-full mt-2'):
+            with ui.tab_panels(tabs, value=t_active).classes('w-full mt-2 bg-transparent'):
                 with ui.tab_panel(t_active):
                     if not state['active_items']:
                         ui.label("💡 ไม่มีรายการ Alarm สถานะ ACTIVE ในขณะนี้").classes('text-gray-500 italic mt-2')
@@ -282,13 +283,10 @@ def alarm_page():
 
         render_alarm_lists()
         ui.timer(0.1, manual_refresh, once=True)
-        ui.timer(25.0, auto_refresh_page)
 
 def render_alarm_card(item, is_active: bool, refresh_callback):
     db_id, prob_id, internal_id = item["id"], item["problem_id"], item.get("internal_id")
     status_icon = "🔴" if is_active else "🟢"
-    
-    title_text = f"{status_icon} [{item.get('type', 'Dynatrace')}] {ack_prefix(item)}[{prob_id}] {item['problem_name']} | Service: {item.get('services', 'Default')}"
 
     # Dialog สำหรับกรอก/แก้ไข Incident ID
     with ui.dialog() as inc_dialog, ui.card().classes('w-80'):
@@ -299,17 +297,6 @@ def render_alarm_card(item, is_active: bool, refresh_callback):
             ui.button('บันทึก', on_click=lambda: [
                 inc_dialog.close(),
                 update_alarm(db_id, {"incident": inc_input.value}, refresh_callback)
-            ]).props('color=primary')
-
-    # Dialog สำหรับกรอก ACK Name
-    with ui.dialog() as ack_dialog, ui.card().classes('w-80'):
-        ui.label('✅ ACK Alert').classes('text-lg font-bold')
-        ack_input = ui.input('ชื่อผู้รับทราบงาน / ACK Name', value=item.get('ack') or 'ACKED').classes('w-full')
-        with ui.row().classes('w-full justify-end mt-2'):
-            ui.button('ยกเลิก', on_click=ack_dialog.close).props('flat')
-            ui.button('บันทึก', on_click=lambda: [
-                ack_dialog.close(),
-                update_alarm(db_id, {"ack": ack_input.value}, refresh_callback)
             ]).props('color=primary')
 
     # Dialog สำหรับเพิ่ม/แก้ไข Remark (Comment)
@@ -353,21 +340,22 @@ def render_alarm_card(item, is_active: bool, refresh_callback):
     # URL ปัญหา Dynatrace
     dt_link_url = item.get('url') or (raw_json.get('problemUrl') if isinstance(raw_json, dict) else None) or f"https://lss67296.live.dynatrace.com/#problems/problemdetails;pid={internal_id}"
 
-    with ui.expansion().classes('w-full bg-white border rounded mb-2') as exp:
+    with ui.expansion().classes('w-full dark:bg-slate-800 bg-white border dark:border-slate-700 rounded mb-2') as exp:
         with exp.add_slot('header'):
-            lbl = ui.label(title_text).classes('font-bold text-sm py-2 cursor-pointer w-full')
-            with lbl:
-                with ui.menu().props('context-menu'):
-                    # 🎯 คลิกขวา -> เปิดแท็บใหม่ผ่าน window.open JS
+            with ui.row().classes('w-full items-center justify-between'):
+                lbl = ui.label(f"{status_icon} [{item.get('type', 'Dynatrace')}] {ack_prefix(item)}[{prob_id}] {item['problem_name']} | Service: {item.get('services', 'Default')}").classes('font-bold text-sm py-2 cursor-pointer w-full dark:text-slate-100')
+                
+                # 🎯 ใช้ ui.context_menu() แก้ไข Warning / Error touch-position
+                with ui.context_menu():
                     ui.menu_item('🔗 เปิดใน Dynatrace', on_click=lambda: ui.run_javascript(f'window.open("{dt_link_url}", "_blank");'))
                     ui.menu_item('🔍 Debug JSON (API)', on_click=debug_dialog.open)
                     ui.menu_item('💬 เพิ่ม Remark / Comment', on_click=remark_dialog.open)
                     ui.menu_item('📝 เพิ่ม/แก้ไข Incident ID', on_click=inc_dialog.open)
-                    ui.menu_item('✅ ACK Alert', on_click=ack_dialog.open)
+                    ui.menu_item('✅ ACK Alert', on_click=lambda: update_alarm(db_id, {"ack": "TEST"}, refresh_callback))
                     ui.menu_item('🧹 Clear Status (RESOLVED)', on_click=lambda: update_alarm(db_id, {"status": "RESOLVED"}, refresh_callback))
 
         # กล่องรายละเอียด Alert
-        with ui.column().classes('p-4 bg-gray-50 gap-3 w-full border-t'):
+        with ui.column().classes('p-4 dark:bg-slate-900/50 bg-gray-50 gap-3 w-full border-t dark:border-slate-700'):
             with ui.grid(columns=3).classes('w-full gap-4 text-sm'):
                 with ui.column().classes('gap-1'):
                     ui.label("📌 Status:").classes('font-bold text-gray-500 text-xs')
@@ -375,38 +363,38 @@ def render_alarm_card(item, is_active: bool, refresh_callback):
 
                 with ui.column().classes('gap-1'):
                     ui.label("🛠️ Services:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('services') or '-').classes('font-medium text-slate-800')
+                    ui.label(item.get('services') or '-').classes('font-medium dark:text-slate-200 text-slate-800')
 
                 with ui.column().classes('gap-1'):
                     ui.label("🎫 Incident ID:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('incident') or '- None -').classes('font-semibold text-blue-600')
+                    ui.label(item.get('incident') or '- None -').classes('font-semibold text-blue-500')
 
                 with ui.column().classes('gap-1'):
                     ui.label("🕒 Start Date:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('start_date') or '-').classes('text-slate-700')
+                    ui.label(item.get('start_date') or '-').classes('dark:text-slate-300 text-slate-700')
 
                 with ui.column().classes('gap-1'):
                     ui.label("🏁 Resolve Date:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('resolve_date') or '- (Active)').classes('text-slate-700')
+                    ui.label(item.get('resolve_date') or '- (Active)').classes('dark:text-slate-300 text-slate-700')
 
                 with ui.column().classes('gap-1'):
                     ui.label("⏱️ Duration:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('duration') or '-').classes('text-slate-700')
+                    ui.label(item.get('duration') or '-').classes('dark:text-slate-300 text-slate-700')
 
                 with ui.column().classes('gap-1 col-span-2'):
                     ui.label("💥 Impact:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('impact') or '-').classes('text-slate-800')
+                    ui.label(item.get('impact') or '-').classes('dark:text-slate-200 text-slate-800')
 
                 with ui.column().classes('gap-1'):
                     ui.label("👤 Acknowledge By:").classes('font-bold text-gray-500 text-xs')
-                    ui.label(item.get('ack') or '- Unacknowledged -').classes('font-medium text-amber-700')
+                    ui.label(item.get('ack') or '- Unacknowledged -').classes('font-bold text-amber-500')
 
-            # 🎯 ปุ่ม HTML direct link บนการ์ด ใส่ stopPropagation ป้องกัน NiceGUI ดักจับ SPA Route
-            with ui.row().classes('w-full items-center justify-between bg-blue-50 p-2.5 rounded border border-blue-100 mt-1'):
+            # ปุ่มเปิด Dynatrace
+            with ui.row().classes('w-full items-center justify-between dark:bg-slate-800 bg-blue-50 p-2.5 rounded border dark:border-slate-700 border-blue-100 mt-1'):
                 with ui.row().classes('items-center gap-2 overflow-hidden'):
-                    ui.icon('link', size='xs').classes('text-blue-600')
-                    ui.label("Dynatrace Problem Link:").classes('font-bold text-xs text-blue-900')
-                    ui.label(dt_link_url).classes('text-xs text-blue-700 truncate max-w-md')
+                    ui.icon('link', size='xs').classes('text-blue-500')
+                    ui.label("Dynatrace Problem Link:").classes('font-bold text-xs dark:text-blue-400 text-blue-900')
+                    ui.label(dt_link_url).classes('text-xs dark:text-blue-300 text-blue-700 truncate max-w-md')
                 
                 ui.html(f'''
                     <a href="{dt_link_url}" 
@@ -420,7 +408,7 @@ def render_alarm_card(item, is_active: bool, refresh_callback):
 
             with ui.column().classes('w-full gap-1 mt-1'):
                 ui.label("💬 Remark / Comment:").classes('font-bold text-gray-500 text-xs')
-                ui.code(item.get('remark') or '- None -').classes('w-full bg-slate-800 text-green-400 p-2.5 rounded text-xs')
+                ui.code(item.get('remark') or '- None -').classes('w-full bg-slate-900 text-green-400 p-2.5 rounded text-xs')
 
 def ack_prefix(item):
     ack = f"[ACK: {item['ack']}] " if item.get('ack') else ""
@@ -441,11 +429,11 @@ def cleaner_page():
     render_header()
     
     with ui.column().classes('w-full p-6 max-w-5xl mx-auto gap-4'):
-        ui.label("🧹 Text Cleaner Tool").classes('text-2xl font-bold text-slate-800')
+        ui.label("🧹 Text Cleaner Tool").classes('text-2xl font-bold dark:text-white text-slate-800')
         ui.label("เครื่องมือทำความสะอาดข้อความ ตัดช่องว่าง แปลงตัวพิมพ์ และจัด Format สำหรับงาน Ops").classes('text-sm text-gray-500')
 
         input_text = ui.textarea(label="ข้อความต้นทาง (Input Text)", placeholder="วางข้อความที่ต้องการ Clean ที่นี่...").classes('w-full').props('outlined rows=6')
-        output_text = ui.textarea(label="ผลลัพธ์ (Cleaned Output)").classes('w-full bg-gray-50').props('outlined rows=6 readonly')
+        output_text = ui.textarea(label="ผลลัพธ์ (Cleaned Output)").classes('w-full dark:bg-slate-800 bg-gray-50').props('outlined rows=6 readonly')
 
         def clean_spaces():
             val = input_text.value or ""
@@ -520,7 +508,7 @@ def handover_page():
 
     with ui.column().classes('w-full p-6 max-w-6xl mx-auto gap-4'):
         with ui.row().classes('w-full justify-between items-center'):
-            ui.label("📦 กล่องงานฝาก (Shift Handover Tasks)").classes('text-2xl font-bold text-slate-800')
+            ui.label("📦 กล่องงานฝาก (Shift Handover Tasks)").classes('text-2xl font-bold dark:text-white text-slate-800')
             
             with ui.dialog() as dlg, ui.card().classes('w-96'):
                 ui.label("ฝากงานใหม่ประจำกะ").classes('text-lg font-bold')
@@ -548,22 +536,23 @@ def handover_page():
                     status = task.get("status", "PENDING")
                     status_color = "warning" if status == "PENDING" else ("info" if status == "IN_PROGRESS" else "positive")
                     
-                    with ui.card().classes('w-full bg-white border shadow-sm p-4 relative'):
+                    with ui.card().classes('w-full dark:bg-slate-800 bg-white border dark:border-slate-700 shadow-sm p-4 relative'):
                         with ui.row().classes('justify-between items-center w-full'):
-                            lbl_title = ui.label(task["title"]).classes('font-bold text-base cursor-pointer text-slate-800')
+                            lbl_title = ui.label(task["title"]).classes('font-bold text-base cursor-pointer dark:text-white text-slate-800')
                             ui.badge(status, color=status_color)
                             
                             with lbl_title:
-                                with ui.menu().props('context-menu'):
+                                # 🎯 ใช้ ui.context_menu()
+                                with ui.context_menu():
                                     ui.menu_item('🟡 กำลังรอ (Pending)', on_click=lambda id=t_id: update_task_status(id, "PENDING"))
                                     ui.menu_item('🔵 กำลังทำ (In Progress)', on_click=lambda id=t_id: update_task_status(id, "IN_PROGRESS"))
                                     ui.menu_item('🟢 เสร็จแล้ว (Done)', on_click=lambda id=t_id: update_task_status(id, "DONE"))
                                     ui.separator()
                                     ui.menu_item('🗑️ ลบงานนี้', on_click=lambda id=t_id: delete_task(id))
 
-                        ui.label(task.get("detail") or "-").classes('text-sm text-gray-600 my-2')
+                        ui.label(task.get("detail") or "-").classes('text-sm dark:text-slate-300 text-gray-600 my-2')
                         
-                        with ui.row().classes('w-full justify-between items-center text-xs text-gray-400 mt-2 border-t pt-2'):
+                        with ui.row().classes('w-full justify-between items-center text-xs text-gray-400 mt-2 border-t dark:border-slate-700 pt-2'):
                             ui.label(f"👤 {task.get('assignee') or 'ไม่ระบุ'} ({task.get('shift') or '-'})")
                             ui.label(f"🕒 {task.get('created_at') or '-'}")
 
